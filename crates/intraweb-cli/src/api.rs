@@ -47,6 +47,7 @@ pub struct AppState {
 #[derive(Serialize)]
 struct Status {
     nickname: String,
+    tagline: String,
     peer_id: String,
     fingerprint: String,
     is_hub: bool,
@@ -76,6 +77,7 @@ fn status_of(state: &AppState) -> Status {
 
     Status {
         nickname: state.config.sanitized_nickname(),
+        tagline: state.config.tagline.clone(),
         peer_id: state.identity.peer_id().to_hex(),
         fingerprint: state.identity.fingerprint(),
         is_hub: state.config.hub,

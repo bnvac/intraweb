@@ -1,150 +1,248 @@
+/* intraweb dashboard.
+ *
+ * The personal-homepage era, with the clutter left out: a profile column, boxed
+ * modules with solid title bars, Verdana. No glitter, no autoplay, no tiled
+ * background, one accent colour instead of a rainbow.
+ *
+ * Every font here is a system font on purpose. The network this runs on has no
+ * internet, so a web font would simply never arrive -- and the era's own faces
+ * happen to be exactly the ones already installed.
+ */
+
 :root {
   color-scheme: light dark;
-  --paper: #faf8f5;
-  --ink: #1c1b19;
-  --muted: #6b675f;
-  --rule: #e2ddd4;
-  --card: #fffefc;
-  --accent: #7a5c3e;
-  --hub: #2f6b4f;
-  --warn-bg: #fbeae7;
-  --warn-ink: #8c2f1d;
-  --warn-rule: #e8b4aa;
-  --ok: #2f6b4f;
+
+  --paper:    #e9e6df;   /* the page behind the modules */
+  --module:   #fffdf9;
+  --ink:      #1d1b18;
+  --muted:    #6d675d;
+  --rule:     #c3bdb1;
+
+  --accent:      #3a5a8c;  /* module title bars, links */
+  --accent-ink:  #f3f1ec;  /* text on the title bar */
+  --online:      #2f7d4f;
+  --alarm:       #9c2f1c;
+  --alarm-bg:    #f7e6e2;
+  --alarm-rule:  #d9a99e;
 }
+
 @media (prefers-color-scheme: dark) {
-  :root {
-    --paper: #17161a;
-    --ink: #e9e5dd;
-    --muted: #9a948a;
-    --rule: #2e2b33;
-    --card: #1e1d23;
-    --accent: #cfa97e;
-    --hub: #7fc4a0;
-    --warn-bg: #3a1f1b;
-    --warn-ink: #f2a493;
-    --warn-rule: #6d382e;
-    --ok: #7fc4a0;
+  :root:not([data-theme="light"]) {
+    --paper:    #131317;
+    --module:   #1c1c22;
+    --ink:      #e7e3da;
+    --muted:    #948d82;
+    --rule:     #34333c;
+
+    --accent:      #33507d;
+    --accent-ink:  #e8ecf5;
+    --online:      #62b586;
+    --alarm:       #e8907c;
+    --alarm-bg:    #3a1f1a;
+    --alarm-rule:  #6b3a2e;
   }
 }
 
+:root[data-theme="dark"] {
+  --paper:    #131317;
+  --module:   #1c1c22;
+  --ink:      #e7e3da;
+  --muted:    #948d82;
+  --rule:     #34333c;
+  --accent:      #33507d;
+  --accent-ink:  #e8ecf5;
+  --online:      #62b586;
+  --alarm:       #e8907c;
+  --alarm-bg:    #3a1f1a;
+  --alarm-rule:  #6b3a2e;
+}
+
 * { box-sizing: border-box; }
+
+/* The dashboard is read on phones over a Pi's wifi; a sideways scroll there is
+   a bug, not a nuisance. */
+html, body { overflow-x: hidden; }
+
 body {
   margin: 0;
-  padding: 0 1.25rem 4rem;
-  font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: var(--ink);
+  padding: 0 1rem 3rem;
   background: var(--paper);
-  max-width: 60rem;
+  color: var(--ink);
+  /* Verdana and Tahoma are the fonts of the era, and are already installed. */
+  font: 13px/1.5 Verdana, Tahoma, Geneva, "DejaVu Sans", sans-serif;
+  max-width: 62rem;
   margin-inline: auto;
 }
 
+.mono { font-family: ui-monospace, "Courier New", Courier, monospace; }
+.wrap { word-break: break-all; }
+
+/* ------------------------------------------------------------- masthead --- */
+
 .masthead {
-  display: flex; flex-wrap: wrap; gap: 1rem;
-  align-items: flex-end; justify-content: space-between;
-  padding: 2rem 0 1.25rem;
-  border-bottom: 1px solid var(--rule);
+  display: flex; flex-wrap: wrap; gap: .5rem 1rem;
+  align-items: baseline; justify-content: space-between;
+  padding: 1.5rem .25rem .85rem;
 }
-h1 { margin: 0; font-size: 1.75rem; letter-spacing: -0.02em; font-weight: 650; }
-.slogan { margin: .15rem 0 0; color: var(--muted); font-size: .95rem; font-style: italic; }
-.me { text-align: right; font-size: .9rem; line-height: 1.4; }
-.me .nick { font-weight: 600; }
-.me .fp { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.me .badge-hub { color: var(--hub); font-weight: 600; }
+.logo {
+  font-weight: 700; font-size: 1.3rem; letter-spacing: -.02em;
+  color: var(--accent);
+}
+.slogan { color: var(--muted); font-size: .8rem; margin-left: .5rem; }
 
-.section-head {
-  display: flex; align-items: baseline; gap: .75rem;
-  margin: 2.25rem 0 .25rem;
+.presence { font-size: .75rem; color: var(--muted); display: flex; align-items: center; gap: .4rem; }
+.presence .dot {
+  width: .5rem; height: .5rem; border-radius: 50%;
+  background: var(--muted); flex: none;
 }
-h2 { margin: 0; font-size: 1.05rem; font-weight: 650; letter-spacing: .01em; }
-.count { color: var(--muted); font-size: .85rem; }
-.hint { margin: .35rem 0 1rem; color: var(--muted); font-size: .875rem; max-width: 46rem; }
+.presence.live .dot { background: var(--online); }
 
-.grid { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fill, minmax(15.5rem, 1fr)); }
+/* -------------------------------------------------------------- layout ---- */
 
-.card {
-  border: 1px solid var(--rule); border-radius: 10px;
-  background: var(--card); padding: .85rem .95rem;
-}
-.card.is-hub { border-left: 3px solid var(--hub); }
-.card.is-alarming { border-color: var(--warn-rule); background: var(--warn-bg); }
-.card .name { font-weight: 600; display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
-.card .fp {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: .78rem; color: var(--muted); margin-top: .15rem; word-break: break-all;
-}
-.card .meta { font-size: .8rem; color: var(--muted); margin-top: .45rem; }
-.card a { color: var(--accent); }
-.card .actions { margin-top: .6rem; display: flex; gap: .5rem; flex-wrap: wrap; }
+.layout { display: grid; gap: 1rem; grid-template-columns: 17rem 1fr; align-items: start; }
+.column-side, .column-main { display: grid; gap: 1rem; align-content: start; }
 
-.tag {
-  font-size: .7rem; text-transform: uppercase; letter-spacing: .05em;
-  padding: .1rem .4rem; border-radius: 4px; border: 1px solid var(--rule);
-  color: var(--muted); font-weight: 600;
+@media (max-width: 46rem) {
+  .layout { grid-template-columns: 1fr; }
 }
-.tag.hub { color: var(--hub); border-color: var(--hub); }
-.tag.verified { color: var(--ok); border-color: var(--ok); }
-.tag.conflict { color: var(--warn-ink); border-color: var(--warn-rule); background: var(--warn-bg); }
+
+/* ------------------------------------------------------------- modules ---- */
+
+.module { border: 1px solid var(--rule); background: var(--module); border-radius: 3px; }
+
+.module-head {
+  margin: 0; padding: .4rem .7rem;
+  background: var(--accent); color: var(--accent-ink);
+  font-size: .72rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .09em;
+  display: flex; justify-content: space-between; align-items: baseline; gap: .5rem;
+  border-radius: 2px 2px 0 0;
+}
+.module-meta { font-weight: 400; text-transform: none; letter-spacing: 0; opacity: .85; }
+.module-body { padding: .8rem .75rem; }
+
+.stack > * + * { margin-top: .5rem; }
+
+.aside-note { margin: .5rem 0 0; font-size: .75rem; color: var(--muted); line-height: 1.45; }
+.empty { margin: .25rem 0; font-size: .8rem; color: var(--muted); }
+
+/* ------------------------------------------------------------- profile ---- */
+
+.profile-name { font-size: 1.1rem; font-weight: 700; }
+.profile-role { font-size: .75rem; color: var(--muted); }
+.profile-tagline {
+  margin: .55rem 0 0; padding-left: .6rem;
+  border-left: 2px solid var(--rule);
+  font-size: .8rem; font-style: italic; color: var(--ink);
+}
+
+.facts { margin: .7rem 0 0; display: grid; grid-template-columns: 4.6rem minmax(0, 1fr); gap: .28rem .5rem; font-size: .75rem; }
+.facts dt { color: var(--muted); }
+/* Grid children default to min-width:auto, so a long unbreakable path would
+   push the whole column wider than a phone screen. */
+.facts dd { margin: 0; min-width: 0; }
+/* A vault path is long and rarely read in full; five wrapped lines of it
+   crowds out everything else in the column. */
+.facts dd.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ----------------------------------------------------------- neighbors ---- */
+
+.neighbor {
+  display: grid; grid-template-columns: 1.6rem minmax(0, 1fr); gap: .1rem .6rem;
+  border: 1px solid var(--rule); border-radius: 3px;
+  padding: .55rem .65rem;
+}
+.neighbor.is-hub { border-left: 3px solid var(--accent); }
+.neighbor.is-alarming { border-color: var(--alarm-rule); background: var(--alarm-bg); }
+
+/* Numbered like a friends list, which also makes them easy to talk about. */
+.neighbor .rank {
+  grid-row: span 3;
+  font-size: .95rem; font-weight: 700; color: var(--muted);
+  text-align: center; line-height: 1.2;
+}
+.neighbor-name { font-weight: 700; display: flex; flex-wrap: wrap; gap: .35rem; align-items: baseline; min-width: 0; }
+.neighbor .fp {
+  font-size: .7rem; color: var(--muted); min-width: 0;
+  font-family: ui-monospace, "Courier New", monospace; overflow-wrap: anywhere;
+}
+.neighbor .meta { font-size: .72rem; color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
+.neighbor .actions { grid-column: 2; margin-top: .4rem; display: flex; gap: .45rem; flex-wrap: wrap; }
+
+.badge {
+  font-size: .62rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+  padding: .08rem .35rem; border: 1px solid var(--rule); border-radius: 2px; color: var(--muted);
+}
+.badge.hub { color: var(--accent); border-color: var(--accent); }
+.badge.verified { color: var(--online); border-color: var(--online); }
+.badge.conflict { color: var(--alarm); border-color: var(--alarm-rule); }
 
 .alarm {
-  margin-top: .55rem; font-size: .82rem; color: var(--warn-ink);
-  border-top: 1px solid var(--warn-rule); padding-top: .5rem;
+  grid-column: 2; margin-top: .45rem; padding-top: .45rem;
+  border-top: 1px solid var(--alarm-rule);
+  font-size: .75rem; color: var(--alarm);
 }
 
-button {
-  font: inherit; font-size: .85rem; cursor: pointer;
-  padding: .35rem .7rem; border-radius: 6px;
-  border: 1px solid var(--rule); background: var(--card); color: var(--ink);
-}
-button:hover { border-color: var(--accent); color: var(--accent); }
-button[disabled] { opacity: .55; cursor: progress; }
+/* ---------------------------------------------------------------- mail ---- */
 
-.empty { color: var(--muted); font-size: .9rem; padding: 1rem 0; }
+#compose { display: grid; gap: .45rem; margin-bottom: .9rem; }
+.field-row { display: flex; gap: .45rem; flex-wrap: wrap; }
+.field-row.end { justify-content: flex-end; align-items: center; }
+.field-row.end .aside-note { margin: 0; flex: 1; }
 
-.check { display: flex; gap: .6rem; padding: .5rem 0; border-bottom: 1px solid var(--rule); font-size: .875rem; }
-.check:last-of-type { border-bottom: 0; }
-.check .dot { flex: none; width: .6rem; height: .6rem; border-radius: 50%; margin-top: .45rem; }
-.check .dot.pass { background: var(--ok); }
-.check .dot.warn { background: var(--accent); }
-.check .dot.fail { background: var(--warn-ink); }
-.check .label { font-weight: 600; text-transform: capitalize; }
-.check .remedy { color: var(--muted); }
-.verdict {
-  margin-top: .9rem; padding: .75rem .85rem; border-radius: 8px;
-  background: var(--card); border: 1px solid var(--rule); font-size: .875rem;
-}
-
-footer {
-  margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule);
-  color: var(--muted); font-size: .78rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all;
-}
-
-@media (max-width: 30rem) {
-  .masthead { flex-direction: column; align-items: flex-start; }
-  .me { text-align: left; }
-}
-
-form#compose { margin: 0 0 1.25rem; display: grid; gap: .5rem; }
-form#compose .row { display: flex; gap: .5rem; flex-wrap: wrap; }
-form#compose .row.end { justify-content: flex-end; align-items: center; }
-form#compose .row.end .hint { margin: 0; flex: 1; }
 input, textarea {
-  font: inherit; font-size: .9rem; flex: 1; min-width: 8rem;
-  padding: .4rem .55rem; border-radius: 6px; resize: vertical;
-  border: 1px solid var(--rule); background: var(--card); color: var(--ink);
+  font: inherit; font-size: .8rem; flex: 1; min-width: 7rem;
+  padding: .38rem .5rem; resize: vertical;
+  border: 1px solid var(--rule); border-radius: 2px;
+  background: var(--paper); color: var(--ink);
 }
 input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
-.letter {
-  border: 1px solid var(--rule); border-left: 3px solid var(--rule);
-  border-radius: 8px; background: var(--card);
-  padding: .65rem .8rem; margin-bottom: .5rem;
-}
-.letter.unread { border-left-color: var(--accent); }
-.letter .subject { font-weight: 600; }
+.letter { border: 1px solid var(--rule); border-radius: 3px; padding: .55rem .65rem; }
+.letter.unread { border-left: 3px solid var(--accent); }
+.letter .subject { font-weight: 700; font-size: .85rem; }
 .letter .from {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: .75rem; color: var(--muted);
+  font-size: .7rem; color: var(--muted); overflow-wrap: anywhere;
+  font-family: ui-monospace, "Courier New", monospace;
 }
-.letter .body { margin-top: .4rem; white-space: pre-wrap; font-size: .9rem; }
+.letter .body { margin-top: .35rem; white-space: pre-wrap; font-size: .8rem; overflow-wrap: anywhere; }
+
+/* -------------------------------------------------------------- doctor ---- */
+
+.check { display: flex; gap: .45rem; font-size: .72rem; padding: .3rem 0; border-bottom: 1px solid var(--rule); }
+.check:last-of-type { border-bottom: 0; }
+.check .dot { flex: none; width: .45rem; height: .45rem; border-radius: 50%; margin-top: .4rem; }
+.check .dot.pass { background: var(--online); }
+.check .dot.warn { background: var(--accent); }
+.check .dot.fail { background: var(--alarm); }
+.check .label { font-weight: 700; }
+.check .remedy { color: var(--muted); }
+.verdict { margin-top: .6rem; padding-top: .55rem; border-top: 1px solid var(--rule); font-size: .75rem; }
+
+/* ------------------------------------------------------------- controls --- */
+
+button {
+  font: inherit; font-size: .75rem; font-weight: 700; cursor: pointer;
+  padding: .35rem .8rem; border-radius: 2px;
+  border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink);
+}
+button:hover { filter: brightness(1.12); }
+button[disabled] { opacity: .55; cursor: progress; }
+button.wide { width: 100%; margin-top: .6rem; }
+
+/* Per-neighbor actions are secondary; an outline keeps them from competing
+   with the one button on the page that sends something. */
+.neighbor .actions button {
+  background: transparent; color: var(--accent);
+  border-color: var(--rule); font-weight: 400;
+}
+.neighbor .actions button:hover { border-color: var(--accent); filter: none; }
+.neighbor .actions { align-items: center; font-size: .75rem; }
+
+a { color: var(--accent); }
+
+.colophon {
+  margin-top: 1.5rem; padding: .8rem .25rem 0;
+  border-top: 1px solid var(--rule);
+  font-size: .7rem; color: var(--muted); text-align: center;
+}

@@ -7,70 +7,96 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+
 <header class="masthead">
   <div class="wordmark">
-    <h1>intraweb</h1>
-    <p class="slogan">your neighborhood web</p>
+    <span class="logo">intraweb</span>
+    <span class="slogan">your neighborhood web</span>
   </div>
-  <div class="me" id="me" aria-live="polite">
-    <span class="spinner">connecting&hellip;</span>
-  </div>
+  <div class="presence"><span class="dot"></span><span id="presence-text">connecting</span></div>
 </header>
 
-<main>
-  <section aria-labelledby="hubs-heading">
-    <div class="section-head">
-      <h2 id="hubs-heading">Neighborhoods</h2>
-      <span class="count" id="hub-count"></span>
-    </div>
-    <p class="hint">You appear on every hub in range at once, serving the same
-       vault to each. Leaving one takes nothing away from you.</p>
-    <div id="hubs" class="grid"></div>
-  </section>
+<div class="layout">
 
-  <section aria-labelledby="peers-heading">
-    <div class="section-head">
-      <h2 id="peers-heading">Neighbors</h2>
-      <span class="count" id="peer-count"></span>
-    </div>
-    <div id="peers" class="grid"></div>
-  </section>
+  <!-- Left column: who you are. The profile panel, minus the glitter. -->
+  <aside class="column-side">
 
-  <section aria-labelledby="mail-heading">
-    <div class="section-head">
-      <h2 id="mail-heading">Mail</h2>
-      <span class="count" id="mail-count"></span>
-    </div>
-    <p class="hint">Messages are signed with your key and go straight to the
-       recipient's node. Anything addressed to somebody out of range waits in
-       your outbox until they turn up.</p>
-    <form id="compose" autocomplete="off">
-      <div class="row">
-        <input id="compose-to" name="to" placeholder="nickname or fingerprint" required>
-        <input id="compose-subject" name="subject" placeholder="subject">
+    <section class="module" aria-labelledby="you-heading">
+      <h2 class="module-head" id="you-heading">You</h2>
+      <div class="module-body profile">
+        <div class="profile-name" id="me-nickname">&hellip;</div>
+        <div class="profile-role" id="me-role"></div>
+        <p class="profile-tagline" id="me-tagline"></p>
+        <dl class="facts">
+          <dt>fingerprint</dt><dd class="mono" id="me-fingerprint">&hellip;</dd>
+          <dt>my page</dt><dd><a id="me-site" href="#">&mdash;</a></dd>
+          <dt>up</dt><dd id="me-uptime">&mdash;</dd>
+        </dl>
+        <p class="aside-note">Read the fingerprint aloud to a neighbor and they
+           can mark you verified. It is the only thing a name cannot fake.</p>
       </div>
-      <textarea id="compose-body" name="body" rows="3" placeholder="message"></textarea>
-      <div class="row end">
-        <span id="compose-result" class="hint"></span>
-        <button type="submit">Send</button>
+    </section>
+
+    <section class="module" aria-labelledby="vault-heading">
+      <h2 class="module-head" id="vault-heading">Vault</h2>
+      <div class="module-body">
+        <dl class="facts">
+          <dt>folder</dt><dd class="mono ellipsis" id="vault-path">&mdash;</dd>
+          <dt>serving</dt><dd class="mono ellipsis" id="site-path">&mdash;</dd>
+          <dt>met</dt><dd id="known-peers">&mdash;</dd>
+        </dl>
       </div>
-    </form>
-    <div id="mail"></div>
-  </section>
+    </section>
 
-  <section aria-labelledby="doctor-heading">
-    <div class="section-head">
-      <h2 id="doctor-heading">Network check</h2>
-      <button id="run-doctor" type="button">Run check</button>
-    </div>
-    <p class="hint">If neighbors you expect are missing, run this. Most missing
-       neighbors are the router's doing, not a broken node.</p>
-    <div id="doctor"></div>
-  </section>
-</main>
+    <section class="module" aria-labelledby="doctor-heading">
+      <h2 class="module-head" id="doctor-heading">Network check</h2>
+      <div class="module-body">
+        <p class="aside-note">Neighbors missing? Usually the router, not the node.</p>
+        <button id="run-doctor" type="button" class="wide">Run check</button>
+        <div id="doctor"></div>
+      </div>
+    </section>
 
-<footer>
-  <span id="vault-path"></span>
+  </aside>
+
+  <!-- Right column: everybody else. -->
+  <main class="column-main">
+
+    <section class="module" aria-labelledby="neighborhood-heading">
+      <h2 class="module-head" id="neighborhood-heading">
+        Neighborhood <span class="module-meta" id="peer-count"></span>
+      </h2>
+      <div class="module-body">
+        <div id="hubs" class="stack"></div>
+        <div id="peers" class="stack"></div>
+      </div>
+    </section>
+
+    <section class="module" aria-labelledby="mail-heading">
+      <h2 class="module-head" id="mail-heading">
+        Mail <span class="module-meta" id="mail-count"></span>
+      </h2>
+      <div class="module-body">
+        <form id="compose" autocomplete="off">
+          <div class="field-row">
+            <input id="compose-to" name="to" placeholder="to: nickname or fingerprint" required>
+            <input id="compose-subject" name="subject" placeholder="subject">
+          </div>
+          <textarea id="compose-body" name="body" rows="3" placeholder="write something"></textarea>
+          <div class="field-row end">
+            <span id="compose-result" class="aside-note"></span>
+            <button type="submit">Send</button>
+          </div>
+        </form>
+        <div id="mail" class="stack"></div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer class="colophon">
+  intraweb &middot; nobody hosts you but you
 </footer>
 
 <script src="/app.js"></script>

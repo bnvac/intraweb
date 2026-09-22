@@ -16,6 +16,11 @@ pub struct Config {
     /// people may pick the same nickname without either being an impostor.
     pub nickname: String,
 
+    /// A line about yourself, shown on your own dashboard. Purely local -- it
+    /// is not announced, so it costs nothing on the wire and nobody else's
+    /// node has to carry it.
+    pub tagline: String,
+
     /// Run as a hub: claim `intranet.local` and keep a roster for the network.
     /// A hub is a meeting point, not an owner. It stores no member content.
     pub hub: bool,
@@ -44,6 +49,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             nickname: default_nickname(),
+            tagline: String::new(),
             hub: false,
             hub_name: "neighborhood".to_string(),
             join_all_hubs: true,
