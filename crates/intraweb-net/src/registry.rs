@@ -7,7 +7,7 @@
 use crate::presence::Presence;
 use intraweb_core::identity::PeerId;
 use intraweb_core::peer::{DiscoverySource, Peer, TrustState};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +34,9 @@ pub struct PeerRegistry {
     peers: HashMap<PeerId, Peer>,
     /// Nickname and time of the last write-through, per peer.
     persisted: HashMap<PeerId, (String, u64)>,
+    /// Keys we refuse to see. Held in memory so the check costs nothing on a
+    /// path that runs for every beacon from every peer.
+    blocked: HashSet<PeerId>,
 }
 
 impl PeerRegistry {
@@ -43,7 +46,23 @@ impl PeerRegistry {
             timeout_secs,
             peers: HashMap::new(),
             persisted: HashMap::new(),
+            blocked: HashSet::new(),
         }
+    }
+
+    pub fn is_blocked(&self, peer_id: PeerId) -> bool {
+        self.blocked.contains(&peer_id)
+    }
+
+    /// Replace the blocklist, dropping anyone newly blocked from the roster.
+    ///
+    /// Blocking should take effect at once rather than when a peer next times
+    /// out; somebody reaching for the block button wants them gone now.
+    pub fn set_blocked(&mut self, blocked: HashSet<PeerId>) {
+        self.peers.retain(|peer_id, _| !blocked.contains(peer_id));
+        self.persisted
+            .retain(|peer_id, _| !blocked.contains(peer_id));
+        self.blocked = blocked;
     }
 
     /// The trust we already hold for a peer, when this sighting need not reach
@@ -75,8 +94,8 @@ impl PeerRegistry {
         let Some(peer) = self.peers.get_mut(&peer_id) else {
             return false;
         };
-        // A raised conflict warning still outranks anything else.
-        if peer.trust != TrustState::NicknameConflict {
+        // A raised warning still outranks anything else.
+        if !peer.trust.is_warning() {
             peer.trust = trust;
         }
         self.persisted.remove(&peer_id);
@@ -112,9 +131,9 @@ impl PeerRegistry {
                 existing.hub_name = hub_name(presence);
                 existing.source = existing.source.merge(source);
                 existing.last_seen = now;
-                // Never downgrade a trust judgement we already made: a peer
-                // flagged as a nickname conflict stays flagged for the session.
-                if existing.trust != TrustState::NicknameConflict {
+                // Never downgrade a judgement we already made: a peer flagged
+                // as an impostor stays flagged for the session.
+                if !existing.trust.is_warning() {
                     existing.trust = trust;
                 }
                 for addr in addrs {

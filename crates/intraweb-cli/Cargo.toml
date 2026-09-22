@@ -21,7 +21,11 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 axum = "0.8"
+tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 clap = { version = "4", features = ["derive"] }
 ratatui = "0.30"
 mime_guess = "2"
+
+[dev-dependencies]
+tempfile = "3"

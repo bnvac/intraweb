@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub struct Store {
     conn: Connection,
@@ -49,7 +49,7 @@ impl Store {
         let current: i64 = self
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
-        for (version, sql) in [(1, SCHEMA_V1), (2, SCHEMA_V2)] {
+        for (version, sql) in [(1, SCHEMA_V1), (2, SCHEMA_V2), (3, SCHEMA_V3)] {
             if current >= version {
                 continue;
             }
@@ -60,6 +60,30 @@ impl Store {
         if current < SCHEMA_VERSION {
             self.conn
                 .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
+        // SQLite cannot hash, so fingerprints for rows written before v3 are
+        // filled in here rather than inside the migration itself.
+        self.backfill_fingerprints()?;
+        Ok(())
+    }
+
+    /// Give older rows the fingerprint column v3 introduced.
+    fn backfill_fingerprints(&self) -> Result<()> {
+        let stale: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT peer_id FROM known_peers WHERE fingerprint = '' LIMIT 5000")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for hex in stale {
+            let Some(peer_id) = PeerId::parse_hex(&hex) else {
+                continue;
+            };
+            self.conn.execute(
+                "UPDATE known_peers SET fingerprint = ?2 WHERE peer_id = ?1",
+                params![hex, peer_id.fingerprint()],
+            )?;
         }
         Ok(())
     }
@@ -93,7 +117,7 @@ impl Store {
 
         // A key we have never seen. If the name is already spoken for by a
         // different key, say so rather than quietly showing a familiar label.
-        let impostor: Option<String> = self
+        let name_taken: Option<String> = self
             .conn
             .query_row(
                 "SELECT peer_id FROM known_peers WHERE nickname = ?1 AND peer_id != ?2 LIMIT 1",
@@ -102,16 +126,33 @@ impl Store {
             )
             .optional()?;
 
+        let fingerprint = peer_id.fingerprint();
+
+        // Grinding a key until its fingerprint *opens* like a known one is
+        // cheap, and people read the first group and stop reading. Flag it.
+        let prefix: String = fingerprint.chars().take(LOOKALIKE_PREFIX_CHARS).collect();
+        let lookalike: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT peer_id FROM known_peers
+                 WHERE fingerprint LIKE ?1 || '%' AND peer_id != ?2 LIMIT 1",
+                params![prefix, hex],
+                |r| r.get(0),
+            )
+            .optional()?;
+
         self.conn.execute(
-            "INSERT INTO known_peers (peer_id, nickname, first_seen, last_seen, verified)
-             VALUES (?1, ?2, ?3, ?3, 0)",
-            params![hex, nickname, now as i64],
+            "INSERT INTO known_peers
+                (peer_id, nickname, fingerprint, first_seen, last_seen, verified)
+             VALUES (?1, ?2, ?3, ?4, ?4, 0)",
+            params![hex, nickname, fingerprint, now as i64],
         )?;
 
-        Ok(if impostor.is_some() {
-            TrustState::NicknameConflict
-        } else {
-            TrustState::New
+        // Somebody actively wearing a name you know is the louder signal.
+        Ok(match (name_taken, lookalike) {
+            (Some(_), _) => TrustState::NicknameConflict,
+            (None, Some(_)) => TrustState::LookalikeFingerprint,
+            (None, None) => TrustState::New,
         })
     }
 
@@ -178,6 +219,52 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    // ---- blocking ---------------------------------------------------------
+
+    /// Refuse to see or hear from a key at all.
+    ///
+    /// Stronger than a warning: a blocked peer is dropped before it reaches the
+    /// roster, and its mail is refused at the door.
+    pub fn block(&self, peer_id: PeerId, reason: &str, now: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO blocked (peer_id, reason, blocked_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(peer_id) DO UPDATE SET reason = ?2, blocked_at = ?3",
+            params![peer_id.to_hex(), reason, now as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn unblock(&self, peer_id: PeerId) -> Result<bool> {
+        let changed = self.conn.execute(
+            "DELETE FROM blocked WHERE peer_id = ?1",
+            params![peer_id.to_hex()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn is_blocked(&self, peer_id: PeerId) -> Result<bool> {
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM blocked WHERE peer_id = ?1",
+                params![peer_id.to_hex()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    /// Every blocked key, for the dashboard and for the discovery loop's cache.
+    pub fn blocked_peers(&self) -> Result<Vec<PeerId>> {
+        let mut stmt = self.conn.prepare("SELECT peer_id FROM blocked")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .filter_map(|hex| PeerId::parse_hex(hex))
+            .collect())
     }
 
     // ---- mail -------------------------------------------------------------
@@ -257,6 +344,17 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Bytes of received mail held on disk, for the inbox quota.
+    pub fn inbox_bytes(&self) -> Result<u64> {
+        let total: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(LENGTH(subject) + LENGTH(body)), 0)
+             FROM mail WHERE direction = 'in'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(total as u64)
+    }
+
     pub fn unread_count(&self) -> Result<u64> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM mail WHERE direction = 'in' AND read_at IS NULL",
@@ -326,6 +424,10 @@ pub struct HubVisit {
     pub last_joined: u64,
 }
 
+/// Fingerprint characters that must match before we call a key a lookalike.
+/// Nine covers `a1b2-c3d4`, the two groups an eye actually reads.
+const LOOKALIKE_PREFIX_CHARS: usize = 9;
+
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS known_peers (
     peer_id    TEXT    PRIMARY KEY,
@@ -357,6 +459,18 @@ CREATE TABLE IF NOT EXISTS mail (
 );
 CREATE INDEX IF NOT EXISTS idx_mail_pending
     ON mail (direction, delivered_at) WHERE delivered_at IS NULL;
+"#;
+
+/// v3: fingerprints stored for lookalike detection, and a blocklist.
+const SCHEMA_V3: &str = r#"
+ALTER TABLE known_peers ADD COLUMN fingerprint TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_known_peers_fingerprint ON known_peers (fingerprint);
+
+CREATE TABLE IF NOT EXISTS blocked (
+    peer_id    TEXT    PRIMARY KEY,
+    reason     TEXT    NOT NULL DEFAULT '',
+    blocked_at INTEGER NOT NULL
+);
 "#;
 
 /// v2: unread tracking, and a guard against filing the same letter twice.
@@ -459,6 +573,131 @@ mod tests {
     fn letter(from: &Identity, to: &Identity, subject: &str, body: &str, at: u64) -> SignedMail {
         let mail = Mail::new(from.peer_id(), to.peer_id(), subject, body, at);
         SignedMail::seal(mail, from).unwrap()
+    }
+
+    /// Plant a row whose fingerprint deliberately opens like `target`'s, which
+    /// is what an attacker gets after grinding keys for a few hours.
+    fn plant_lookalike_of(store: &Store, target: PeerId) {
+        let prefix: String = target.fingerprint().chars().take(9).collect();
+        let decoy = Identity::generate().unwrap().peer_id();
+        store
+            .conn
+            .execute(
+                "INSERT INTO known_peers
+                    (peer_id, nickname, fingerprint, first_seen, last_seen, verified)
+                 VALUES (?1, 'someone', ?2, 1, 1, 0)",
+                params![decoy.to_hex(), format!("{prefix}xxxxxxxxxx")],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_key_whose_fingerprint_opens_like_a_known_one_is_flagged() {
+        let store = Store::open_in_memory().unwrap();
+        let newcomer = peer();
+        plant_lookalike_of(&store, newcomer);
+
+        assert_eq!(
+            store.observe_peer(newcomer, "stranger", 100).unwrap(),
+            TrustState::LookalikeFingerprint,
+        );
+    }
+
+    #[test]
+    fn an_ordinary_new_key_is_not_called_a_lookalike() {
+        let store = Store::open_in_memory().unwrap();
+        store.observe_peer(peer(), "alice", 100).unwrap();
+
+        assert_eq!(
+            store.observe_peer(peer(), "bob", 110).unwrap(),
+            TrustState::New
+        );
+    }
+
+    #[test]
+    fn wearing_a_known_name_outranks_merely_looking_similar() {
+        // Both signals at once: the one that means somebody is actively
+        // impersonating a name should be the one shown.
+        let store = Store::open_in_memory().unwrap();
+        store.observe_peer(peer(), "alice", 100).unwrap();
+
+        let newcomer = peer();
+        plant_lookalike_of(&store, newcomer);
+
+        assert_eq!(
+            store.observe_peer(newcomer, "alice", 110).unwrap(),
+            TrustState::NicknameConflict,
+        );
+    }
+
+    #[test]
+    fn blocking_hides_a_peer_and_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("intraweb.db");
+        let mallory = peer();
+        {
+            let store = Store::open(&path).unwrap();
+            assert!(!store.is_blocked(mallory).unwrap());
+            store
+                .block(mallory, "kept pretending to be alice", 100)
+                .unwrap();
+            assert!(store.is_blocked(mallory).unwrap());
+        }
+
+        let reopened = Store::open(&path).unwrap();
+        assert!(
+            reopened.is_blocked(mallory).unwrap(),
+            "a block outlives the session"
+        );
+        assert_eq!(reopened.blocked_peers().unwrap(), vec![mallory]);
+
+        assert!(reopened.unblock(mallory).unwrap());
+        assert!(!reopened.is_blocked(mallory).unwrap());
+    }
+
+    #[test]
+    fn blocking_the_same_key_twice_updates_rather_than_fails() {
+        let store = Store::open_in_memory().unwrap();
+        let mallory = peer();
+        store.block(mallory, "first reason", 100).unwrap();
+        store.block(mallory, "second reason", 200).unwrap();
+        assert_eq!(store.blocked_peers().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_vault_from_before_blocking_existed_gains_fingerprints() {
+        // A v2 database, as an earlier release left it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("intraweb.db");
+        let alice = peer();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute_batch(SCHEMA_V2).unwrap();
+            conn.execute(
+                "INSERT INTO known_peers (peer_id, nickname, first_seen, last_seen, verified)
+                 VALUES (?1, 'alice', 1, 1, 0)",
+                params![alice.to_hex()],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+
+        let stored: String = store
+            .conn
+            .query_row(
+                "SELECT fingerprint FROM known_peers WHERE peer_id = ?1",
+                params![alice.to_hex()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            alice.fingerprint(),
+            "old rows are given their fingerprint"
+        );
     }
 
     #[test]

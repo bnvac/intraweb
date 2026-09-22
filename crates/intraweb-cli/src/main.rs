@@ -1,7 +1,9 @@
 //! intraweb -- your neighborhood web.
 
 mod api;
+mod guard;
 mod http;
+mod limits;
 mod mail;
 mod surf;
 mod tui;
@@ -81,6 +83,21 @@ enum Command {
         #[arg(long, short, value_name = "PATH")]
         output: Option<PathBuf>,
     },
+    /// Refuse to see or hear from somebody.
+    Block {
+        /// Nickname, fingerprint, or public key.
+        peer: String,
+        /// A note to yourself about why.
+        #[arg(long, short, default_value = "")]
+        reason: String,
+    },
+    /// Undo a block.
+    Unblock {
+        /// Nickname, fingerprint, or public key.
+        peer: String,
+    },
+    /// List the keys you have blocked.
+    Blocked,
     /// Print your identity and where your vault lives.
     Id,
 }
@@ -165,6 +182,9 @@ async fn run() -> Result<()> {
         Command::Surf { listen, open } => surf_command(vault, listen, open).await,
         Command::Mail { cmd } => mail_command(vault, cmd.unwrap_or(MailCmd::Inbox)).await,
         Command::Ls { peer } => ls_command(vault, &peer).await,
+        Command::Block { peer, reason } => block_command(vault, &peer, &reason).await,
+        Command::Unblock { peer } => unblock_command(vault, &peer).await,
+        Command::Blocked => blocked_command(vault),
         Command::Get { peer, file, output } => get_command(vault, &peer, &file, output).await,
         Command::Doctor { listen } => doctor(vault, listen).await,
         Command::Id => show_id(vault),
@@ -259,6 +279,7 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
         vault: Arc::clone(&vault),
         site_dir: site_dir.clone(),
         started_at: now_secs(),
+        limiter: Arc::new(limits::RateLimiter::new(limits::now_float())),
     };
 
     // A hub tries port 80 so newcomers can type a bare hostname -- unless a
@@ -563,6 +584,65 @@ async fn mail_command(vault: Vault, cmd: MailCmd) -> Result<()> {
             Ok(())
         }
     }
+}
+
+async fn block_command(vault: Vault, query: &str, reason: &str) -> Result<()> {
+    let (identity, config, _) = open_vault(&vault)?;
+    let store = Arc::new(Mutex::new(Store::open(&vault.db_path())?));
+    let config = Arc::new(config);
+
+    let live = peers_now(&vault, &config, &identity, &store, 3).await?;
+    let target = mail::resolve_or_explain(&mail::addressable(&live, &store), query)?;
+
+    {
+        let Ok(store) = store.lock() else {
+            anyhow::bail!("the keyring is busy");
+        };
+        store.block(target.peer_id, reason, now_secs())?;
+    }
+
+    println!("Blocked {} ({}).", target.nickname, target.fingerprint);
+    println!("They are dropped from the roster and their mail is refused.");
+    Ok(())
+}
+
+async fn unblock_command(vault: Vault, query: &str) -> Result<()> {
+    let (identity, config, _) = open_vault(&vault)?;
+    let store = Arc::new(Mutex::new(Store::open(&vault.db_path())?));
+    let config = Arc::new(config);
+
+    // A blocked peer is not in the roster, so the keyring is what can name them.
+    let candidates = mail::addressable(&[], &store);
+    let target = match mail::resolve_or_explain(&candidates, query) {
+        Ok(peer) => peer,
+        Err(_) => {
+            let live = peers_now(&vault, &config, &identity, &store, 2).await?;
+            mail::resolve_or_explain(&mail::addressable(&live, &store), query)?
+        }
+    };
+
+    let Ok(store) = store.lock() else {
+        anyhow::bail!("the keyring is busy");
+    };
+    if store.unblock(target.peer_id)? {
+        println!("Unblocked {} ({}).", target.nickname, target.fingerprint);
+    } else {
+        println!("{} was not blocked.", target.nickname);
+    }
+    Ok(())
+}
+
+fn blocked_command(vault: Vault) -> Result<()> {
+    let store = Store::open(&vault.db_path())?;
+    let blocked = store.blocked_peers()?;
+    if blocked.is_empty() {
+        println!("Nobody is blocked.");
+        return Ok(());
+    }
+    for peer_id in blocked {
+        println!("  {}  {}", peer_id.fingerprint(), peer_id.to_hex());
+    }
+    Ok(())
 }
 
 async fn ls_command(vault: Vault, query: &str) -> Result<()> {

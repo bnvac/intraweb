@@ -38,6 +38,20 @@ impl Roster {
         self.inner.read().map(|reg| reg.len()).unwrap_or(0)
     }
 
+    /// Refresh the set of keys we refuse to hear from.
+    pub fn set_blocked(&self, blocked: std::collections::HashSet<intraweb_core::PeerId>) {
+        if let Ok(mut reg) = self.inner.write() {
+            reg.set_blocked(blocked);
+        }
+    }
+
+    pub fn is_blocked(&self, peer_id: intraweb_core::PeerId) -> bool {
+        self.inner
+            .read()
+            .map(|reg| reg.is_blocked(peer_id))
+            .unwrap_or(false)
+    }
+
     /// Record that the operator verified a peer, so the roster reflects it now
     /// rather than at the next keyring write-through.
     pub fn note_verified(&self, peer_id: intraweb_core::PeerId) -> bool {
@@ -192,6 +206,26 @@ impl Node {
             }
         }
 
+        // Keep the in-memory blocklist in step with the keyring, so a block
+        // made from the CLI reaches a already-running node.
+        {
+            let registry = Arc::clone(&registry);
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(5));
+                loop {
+                    ticker.tick().await;
+                    let blocked = {
+                        let Ok(store) = store.lock() else { continue };
+                        store.blocked_peers().unwrap_or_default()
+                    };
+                    if let Ok(mut reg) = registry.write() {
+                        reg.set_blocked(blocked.into_iter().collect());
+                    }
+                }
+            });
+        }
+
         // Expire peers that stopped announcing.
         {
             let registry = Arc::clone(&registry);
@@ -235,6 +269,16 @@ fn absorb(
     // it is genuinely our signature. Drop it here rather than after the
     // registry's self-check, or we file ourselves in our own keyring.
     if presence.peer_id == self_id {
+        return;
+    }
+
+    // A blocked key is dropped before anything else happens: no verification,
+    // no keyring write, no roster entry.
+    if registry
+        .read()
+        .map(|reg| reg.is_blocked(presence.peer_id))
+        .unwrap_or(false)
+    {
         return;
     }
 

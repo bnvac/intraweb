@@ -53,11 +53,25 @@ function badges(peer) {
   if (peer.trust === "verified") out.push('<span class="badge verified">verified</span>');
   if (peer.trust === "new") out.push('<span class="badge">new</span>');
   if (peer.trust === "nickname_conflict") out.push('<span class="badge conflict">name clash</span>');
+  if (peer.trust === "lookalike_fingerprint") out.push('<span class="badge conflict">lookalike</span>');
   return out.join(" ");
 }
 
+/// What to say about a peer whose identity does not add up.
+function alarmText(peer) {
+  if (peer.trust === "nickname_conflict") {
+    return `<strong>Not the ${escapeHtml(peer.nickname)} you met before.</strong>
+      Same name, different key &mdash; compare fingerprints in person.`;
+  }
+  if (peer.trust === "lookalike_fingerprint") {
+    return `<strong>This fingerprint opens like one you already know.</strong>
+      Keys can be ground until the first groups match. Read all of it, not the start.`;
+  }
+  return null;
+}
+
 function neighborCard(peer, rank, now) {
-  const alarming = peer.trust === "nickname_conflict";
+  const alarming = peer.trust === "nickname_conflict" || peer.trust === "lookalike_fingerprint";
   const classes = ["neighbor"];
   if (peer.is_hub) classes.push("is-hub");
   if (alarming) classes.push("is-alarming");
@@ -67,12 +81,8 @@ function neighborCard(peer, rank, now) {
     ? `http://${host}:${peer.api_port}/~${encodeURIComponent(peer.nickname)}`
     : null;
 
-  // A name clash is the one thing worth interrupting someone over: a familiar
-  // label arriving on a key we have never seen before.
-  const alarm = alarming
-    ? `<div class="alarm"><strong>Not the ${escapeHtml(peer.nickname)} you met before.</strong>
-       Same name, different key &mdash; compare fingerprints in person.</div>`
-    : "";
+  const warning = alarmText(peer);
+  const alarm = warning ? `<div class="alarm">${warning}</div>` : "";
 
   return `
     <article class="${classes.join(" ")}">
@@ -90,6 +100,7 @@ function neighborCard(peer, rank, now) {
         ${peer.trust !== "verified"
           ? `<button type="button" data-verify="${escapeHtml(peer.peer_id)}">Checked in person</button>`
           : ""}
+        <button type="button" class="danger" data-block="${escapeHtml(peer.peer_id)}">Block</button>
       </div>
     </article>`;
 }
@@ -194,6 +205,14 @@ async function refresh() {
 }
 
 document.addEventListener("click", async (event) => {
+  const blockButton = event.target.closest("[data-block]");
+  if (blockButton) {
+    blockButton.disabled = true;
+    await fetch(`/api/peers/${blockButton.dataset.block}/block`, { method: "POST" });
+    await refresh();
+    return;
+  }
+
   const verifyButton = event.target.closest("[data-verify]");
   if (verifyButton) {
     verifyButton.disabled = true;

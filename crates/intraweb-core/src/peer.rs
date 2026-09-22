@@ -37,12 +37,23 @@ pub enum TrustState {
     Verified,
     /// This nickname previously belonged to a different key. Possible impostor.
     NicknameConflict,
+    /// A key we have never seen whose fingerprint opens like one we know.
+    ///
+    /// A full fingerprint collision is out of reach, but grinding keys until
+    /// the first group or two match is cheap -- and people compare the first
+    /// group and stop reading.
+    LookalikeFingerprint,
 }
 
 impl TrustState {
     /// Whether the dashboard should draw attention to this peer.
     pub fn needs_attention(self) -> bool {
-        matches!(self, Self::NicknameConflict)
+        matches!(self, Self::NicknameConflict | Self::LookalikeFingerprint)
+    }
+
+    /// A warning, once raised, is never quietly replaced by a calmer state.
+    pub fn is_warning(self) -> bool {
+        self.needs_attention()
     }
 }
 

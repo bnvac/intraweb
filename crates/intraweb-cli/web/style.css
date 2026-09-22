@@ -237,6 +237,8 @@ button.wide { width: 100%; margin-top: .6rem; }
   border-color: var(--rule); font-weight: 400;
 }
 .neighbor .actions button:hover { border-color: var(--accent); filter: none; }
+.neighbor .actions button.danger { color: var(--alarm); }
+.neighbor .actions button.danger:hover { border-color: var(--alarm-rule); }
 .neighbor .actions { align-items: center; font-size: .75rem; }
 
 a { color: var(--accent); }
