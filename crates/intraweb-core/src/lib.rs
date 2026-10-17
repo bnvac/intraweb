@@ -9,6 +9,7 @@ pub mod channel;
 pub mod config;
 pub mod db;
 pub mod hex;
+pub mod identicon;
 pub mod identity;
 pub mod mail;
 pub mod peer;

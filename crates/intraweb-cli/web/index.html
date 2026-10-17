@@ -24,16 +24,32 @@
     <section class="module" aria-labelledby="you-heading">
       <h2 class="module-head" id="you-heading">You</h2>
       <div class="module-body profile">
-        <div class="profile-name" id="me-nickname">&hellip;</div>
-        <div class="profile-role" id="me-role"></div>
+        <div class="profile-head">
+          <img class="identicon" id="me-icon" alt="" width="52" height="52">
+          <div>
+            <div class="profile-name" id="me-nickname">&hellip;</div>
+            <div class="profile-role" id="me-role"></div>
+          </div>
+        </div>
         <p class="profile-tagline" id="me-tagline"></p>
+        <form id="edit-profile" hidden>
+          <label>name <input id="edit-nickname" maxlength="32"></label>
+          <label>about <textarea id="edit-tagline" rows="2" maxlength="140"></textarea></label>
+          <div class="field-row end">
+            <span id="edit-result" class="aside-note"></span>
+            <button type="button" id="cancel-edit" class="quiet">Cancel</button>
+            <button type="submit">Save</button>
+          </div>
+        </form>
         <dl class="facts">
           <dt>fingerprint</dt><dd class="mono" id="me-fingerprint">&hellip;</dd>
           <dt>my page</dt><dd><a id="me-site" href="#">&mdash;</a></dd>
           <dt>up</dt><dd id="me-uptime">&mdash;</dd>
         </dl>
+        <button type="button" id="start-edit" class="quiet wide">Edit profile</button>
         <p class="aside-note">Read the fingerprint aloud to a neighbor and they
-           can mark you verified. It is the only thing a name cannot fake.</p>
+           can mark you verified. The picture is drawn from your key: if a
+           neighbor's shape changes, so did their key.</p>
       </div>
     </section>
 
@@ -69,6 +85,36 @@
       <div class="module-body">
         <div id="hubs" class="stack"></div>
         <div id="peers" class="stack"></div>
+      </div>
+    </section>
+
+    <section class="module" aria-labelledby="channels-heading">
+      <h2 class="module-head" id="channels-heading">
+        Channels <span class="module-meta" id="channel-meta"></span>
+      </h2>
+      <div class="module-body">
+        <div class="channel-tabs" id="channel-tabs"></div>
+        <div id="channel-posts" class="posts"></div>
+        <form id="say-form" autocomplete="off">
+          <div class="field-row">
+            <input id="say-body" placeholder="say something" maxlength="800">
+            <button type="submit">Send</button>
+          </div>
+          <div class="field-row end">
+            <span id="say-result" class="aside-note"></span>
+          </div>
+        </form>
+        <details class="new-channel">
+          <summary>Start a private channel</summary>
+          <form id="new-channel-form" autocomplete="off">
+            <div class="field-row">
+              <input id="new-channel-name" placeholder="channel name" maxlength="40" required>
+              <button type="submit">Create</button>
+            </div>
+            <p class="aside-note">Only people you invite can read it. Invite a
+               neighbor from their card below &mdash; they must be in range.</p>
+          </form>
+        </details>
       </div>
     </section>
 

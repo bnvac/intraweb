@@ -82,7 +82,7 @@ fn status_of(state: &AppState) -> Status {
 
     Status {
         nickname: state.config.sanitized_nickname(),
-        tagline: state.config.tagline.clone(),
+        tagline: profile_on_disk(state).tagline,
         peer_id: state.identity.peer_id().to_hex(),
         fingerprint: state.identity.fingerprint(),
         is_hub: state.config.hub,
@@ -492,6 +492,87 @@ fn guarded_dir(
         .service(ServeDir::new(&root))
 }
 
+// ---- profile --------------------------------------------------------------
+
+/// A key's picture, so people compare a shape rather than skim hex.
+async fn identicon(Path(peer_hex): Path<String>) -> impl IntoResponse {
+    let trimmed = peer_hex.strip_suffix(".svg").unwrap_or(&peer_hex);
+    let Some(peer_id) = PeerId::parse_hex(trimmed) else {
+        return (StatusCode::BAD_REQUEST, "not a valid peer id").into_response();
+    };
+    (
+        [
+            ("content-type", "image/svg+xml"),
+            // Deterministic and permanent, so it never needs refetching.
+            ("cache-control", "public, max-age=31536000, immutable"),
+        ],
+        intraweb_core::identicon::svg(peer_id, 128),
+    )
+        .into_response()
+}
+
+#[derive(Serialize, serde::Deserialize, Default)]
+struct Profile {
+    nickname: String,
+    tagline: String,
+}
+
+/// Read the profile from disk rather than the copy loaded at startup, so an
+/// edit shows up without a restart.
+fn profile_on_disk(state: &AppState) -> Profile {
+    match Config::load_or_create(&state.vault.config_path()) {
+        Ok(config) => Profile {
+            nickname: config.sanitized_nickname(),
+            tagline: config.tagline,
+        },
+        Err(_) => Profile::default(),
+    }
+}
+
+async fn get_profile(State(state): State<AppState>) -> impl IntoResponse {
+    axum::Json(profile_on_disk(&state))
+}
+
+/// Save an edited profile.
+///
+/// The tagline takes effect at once because it is read from disk. The
+/// nickname only changes what neighbors see once the node restarts, since the
+/// announcement is signed and published when discovery starts -- the response
+/// says so rather than letting it look as though nothing happened.
+async fn put_profile(State(state): State<AppState>, body: String) -> impl IntoResponse {
+    let Ok(edit) = serde_json::from_str::<Profile>(&body) else {
+        return (StatusCode::BAD_REQUEST, "could not read that form").into_response();
+    };
+
+    let path = state.vault.config_path();
+    let Ok(mut config) = Config::load_or_create(&path) else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not read the config",
+        )
+            .into_response();
+    };
+
+    let renamed = !edit.nickname.trim().is_empty() && edit.nickname != config.sanitized_nickname();
+    if !edit.nickname.trim().is_empty() {
+        config.nickname = edit.nickname;
+    }
+    config.tagline = edit.tagline;
+
+    match config.save(&path) {
+        Ok(()) => (
+            StatusCode::OK,
+            if renamed {
+                "Saved. Neighbors see the new name once you restart the node."
+            } else {
+                "Saved."
+            },
+        )
+            .into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")).into_response(),
+    }
+}
+
 // ---- channels -------------------------------------------------------------
 
 /// Take a post from another node.
@@ -753,6 +834,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hubs", get(hubs))
         .route("/api/hubs/history", get(hub_history))
         .route("/api/doctor", get(doctor))
+        .route("/api/profile", get(get_profile).post(put_profile))
+        .route("/identicon/{peer}", get(identicon))
         .route("/api/state", get(combined_state))
         .route("/api/mail", get(inbox).post(receive_mail))
         .route("/api/mail/send", post(send_mail))

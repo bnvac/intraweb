@@ -87,6 +87,7 @@ function neighborCard(peer, rank, now) {
   return `
     <article class="${classes.join(" ")}">
       <span class="rank">${rank}</span>
+      <img class="identicon" src="/identicon/${escapeHtml(peer.peer_id)}.svg" alt="" loading="lazy">
       <div class="neighbor-name">${escapeHtml(peer.nickname)} ${badges(peer)}</div>
       <div class="fp">${escapeHtml(peer.fingerprint)}</div>
       <div class="meta">
@@ -100,12 +101,21 @@ function neighborCard(peer, rank, now) {
         ${peer.trust !== "verified"
           ? `<button type="button" data-verify="${escapeHtml(peer.peer_id)}">Checked in person</button>`
           : ""}
+        ${selectedChannel && !selectedChannel.channel_id_is_public
+          ? `<button type="button" data-invite="${escapeHtml(peer.peer_id)}">Invite to ${escapeHtml(selectedChannel.name)}</button>`
+          : ""}
         <button type="button" class="danger" data-block="${escapeHtml(peer.peer_id)}">Block</button>
       </div>
     </article>`;
 }
 
+// Which channel the reader is looking at. Kept here so a refresh does not
+// yank them back to the neighborhood mid-conversation.
+let selectedChannelId = null;
+let selectedChannel = null;
+
 function renderMe(status) {
+  document.getElementById("me-icon").src = `/identicon/${status.peer_id}.svg`;
   text("me-nickname", status.nickname);
   text("me-role", status.is_hub ? `hosting "${status.hub_name || ""}"` : "neighbor");
   text("me-fingerprint", status.fingerprint);
@@ -191,6 +201,67 @@ function renderDoctor(report) {
     `${checks}<div class="verdict">${escapeHtml(report.verdict)}</div>`;
 }
 
+function renderChannels(channels) {
+  const tabs = document.getElementById("channel-tabs");
+
+  if (!selectedChannelId && channels.length) {
+    const neighborhood = channels.find((c) => !c.is_private) || channels[0];
+    selectedChannelId = neighborhood.channel_id;
+  }
+  selectedChannel = channels.find((c) => c.channel_id === selectedChannelId) || null;
+  if (selectedChannel) {
+    selectedChannel.channel_id_is_public = !selectedChannel.is_private;
+  }
+
+  tabs.innerHTML = channels
+    .map(
+      (channel) => `
+      <button type="button"
+              class="channel-tab ${channel.channel_id === selectedChannelId ? "active" : ""} ${
+                channel.can_read ? "" : "locked"
+              }"
+              data-channel="${escapeHtml(channel.channel_id)}">
+        ${channel.is_private ? "&#9679; " : ""}${escapeHtml(channel.name)}
+      </button>`,
+    )
+    .join("");
+
+  document.getElementById("channel-meta").textContent = selectedChannel
+    ? selectedChannel.is_private
+      ? "private \u00b7 members only"
+      : "everyone in range"
+    : "";
+}
+
+function renderPosts(posts) {
+  document.getElementById("channel-posts").innerHTML = posts.length
+    ? posts
+        .map(
+          (post) => `
+        <div class="post ${post.readable ? "" : "sealed"}">
+          <span class="who">${escapeHtml(post.fingerprint.slice(0, 9))}</span>
+          <span class="said">${
+            post.readable
+              ? escapeHtml(post.body)
+              : "encrypted &mdash; you are not in this channel"
+          }</span>
+        </div>`,
+        )
+        .join("")
+    : '<p class="empty">Nothing said here yet.</p>';
+}
+
+async function refreshChannel() {
+  if (!selectedChannelId) return;
+  try {
+    renderPosts(await getJson(`/api/channels/${selectedChannelId}/posts`));
+    const box = document.getElementById("channel-posts");
+    box.scrollTop = box.scrollHeight;
+  } catch (err) {
+    renderPosts([]);
+  }
+}
+
 async function refresh() {
   try {
     // One request: status, roster and mail are always rendered together.
@@ -198,6 +269,8 @@ async function refresh() {
     renderMe(state.status);
     renderRosters(state.peers, state.status);
     renderMail(state.mail, state.status.now);
+    renderChannels(await getJson("/api/channels"));
+    await refreshChannel();
   } catch (err) {
     document.querySelector(".presence").classList.remove("live");
     text("presence-text", "node unreachable");
@@ -234,6 +307,94 @@ document.addEventListener("click", async (event) => {
     }
     button.disabled = false;
     button.textContent = "Run check";
+  }
+});
+
+document.addEventListener("click", async (event) => {
+  const tab = event.target.closest("[data-channel]");
+  if (tab) {
+    selectedChannelId = tab.dataset.channel;
+    await refresh();
+    return;
+  }
+
+  const inviteButton = event.target.closest("[data-invite]");
+  if (inviteButton && selectedChannelId) {
+    inviteButton.disabled = true;
+    const response = await fetch(
+      `/api/channels/${selectedChannelId}/invite/${inviteButton.dataset.invite}`,
+      { method: "POST" },
+    );
+    document.getElementById("say-result").textContent = await response.text();
+    inviteButton.disabled = false;
+    return;
+  }
+
+  if (event.target.id === "start-edit") {
+    const form = document.getElementById("edit-profile");
+    const profile = await getJson("/api/profile");
+    document.getElementById("edit-nickname").value = profile.nickname;
+    document.getElementById("edit-tagline").value = profile.tagline;
+    form.hidden = false;
+    event.target.hidden = true;
+    return;
+  }
+
+  if (event.target.id === "cancel-edit") {
+    document.getElementById("edit-profile").hidden = true;
+    document.getElementById("start-edit").hidden = false;
+  }
+});
+
+document.getElementById("edit-profile").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const result = document.getElementById("edit-result");
+  result.textContent = "Saving\u2026";
+
+  const response = await fetch("/api/profile", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      nickname: document.getElementById("edit-nickname").value,
+      tagline: document.getElementById("edit-tagline").value,
+    }),
+  });
+  // The server says plainly when a rename needs a restart to be announced.
+  result.textContent = await response.text();
+  if (response.ok) refresh();
+});
+
+document.getElementById("say-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const input = document.getElementById("say-body");
+  if (!input.value.trim() || !selectedChannelId) return;
+
+  const response = await fetch(`/api/channels/${selectedChannelId}/say`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ body: input.value }),
+  });
+  document.getElementById("say-result").textContent = await response.text();
+  if (response.ok) {
+    input.value = "";
+    await refreshChannel();
+  }
+});
+
+document.getElementById("new-channel-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = document.getElementById("new-channel-name");
+  const response = await fetch("/api/channels/new", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: name.value }),
+  });
+  if (response.ok) {
+    selectedChannelId = (await response.text()).trim();
+    name.value = "";
+    await refresh();
+  } else {
+    document.getElementById("say-result").textContent = await response.text();
   }
 });
 

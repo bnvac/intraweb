@@ -248,3 +248,60 @@ a { color: var(--accent); }
   border-top: 1px solid var(--rule);
   font-size: .7rem; color: var(--muted); text-align: center;
 }
+
+/* ------------------------------------------------------- key pictures ----- */
+
+/* Drawn from the key itself: a changed shape means a changed key, which an
+   eye catches far more reliably than a changed hex group. */
+.identicon {
+  border: 1px solid var(--rule); border-radius: 3px;
+  background: var(--paper); flex: none; display: block;
+}
+.profile-head { display: flex; gap: .65rem; align-items: center; }
+.neighbor .identicon { width: 34px; height: 34px; }
+.neighbor { grid-template-columns: 1.3rem 34px minmax(0, 1fr); }
+.neighbor .rank { grid-row: span 4; }
+.neighbor .identicon { grid-row: span 4; }
+.neighbor .actions { grid-column: 3; }
+.neighbor .alarm { grid-column: 3; }
+
+/* ------------------------------------------------------- profile edit ----- */
+
+#edit-profile { display: grid; gap: .45rem; margin-top: .6rem; }
+/* An explicit display wins over the `hidden` attribute, so the form has to
+   opt back out of it or it is never actually hidden. */
+#edit-profile[hidden] { display: none; }
+#edit-profile label { display: grid; gap: .2rem; font-size: .72rem; color: var(--muted); }
+button.quiet {
+  background: transparent; color: var(--accent);
+  border-color: var(--rule); font-weight: 400;
+}
+button.quiet:hover { border-color: var(--accent); filter: none; }
+
+/* ---------------------------------------------------------- channels ------ */
+
+.channel-tabs { display: flex; flex-wrap: wrap; gap: .3rem; margin-bottom: .6rem; }
+.channel-tab {
+  font: inherit; font-size: .72rem; cursor: pointer;
+  padding: .25rem .55rem; border-radius: 2px;
+  border: 1px solid var(--rule); background: var(--paper); color: var(--ink);
+  font-weight: 400;
+}
+.channel-tab.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 700; }
+.channel-tab.locked { opacity: .6; }
+
+.posts {
+  max-height: 17rem; overflow-y: auto;
+  border: 1px solid var(--rule); border-radius: 3px;
+  padding: .5rem .55rem; margin-bottom: .6rem; background: var(--paper);
+}
+.post { display: flex; gap: .45rem; padding: .2rem 0; font-size: .8rem; align-items: baseline; }
+.post .who {
+  font-family: ui-monospace, "Courier New", monospace; font-size: .68rem;
+  color: var(--muted); flex: none;
+}
+.post .said { min-width: 0; overflow-wrap: anywhere; }
+.post.sealed .said { color: var(--muted); font-style: italic; }
+
+.new-channel summary { font-size: .75rem; color: var(--accent); cursor: pointer; }
+.new-channel form { margin-top: .5rem; }
