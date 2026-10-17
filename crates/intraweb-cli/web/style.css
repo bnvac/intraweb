@@ -305,3 +305,10 @@ button.quiet:hover { border-color: var(--accent); filter: none; }
 
 .new-channel summary { font-size: .75rem; color: var(--accent); cursor: pointer; }
 .new-channel form { margin-top: .5rem; }
+
+.letter .actions { margin-top: .45rem; display: flex; gap: .4rem; }
+.letter .actions button {
+  background: transparent; border-color: var(--rule); font-weight: 400; font-size: .7rem;
+}
+.letter .actions button.danger { color: var(--alarm); }
+.letter .from .identicon { vertical-align: -.2rem; margin-right: .25rem; }

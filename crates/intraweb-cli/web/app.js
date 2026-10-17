@@ -104,6 +104,7 @@ function neighborCard(peer, rank, now) {
         ${selectedChannel && !selectedChannel.channel_id_is_public
           ? `<button type="button" data-invite="${escapeHtml(peer.peer_id)}">Invite to ${escapeHtml(selectedChannel.name)}</button>`
           : ""}
+        <button type="button" data-sign="${escapeHtml(peer.peer_id)}">Sign guestbook</button>
         <button type="button" class="danger" data-block="${escapeHtml(peer.peer_id)}">Block</button>
       </div>
     </article>`;
@@ -178,6 +179,9 @@ function renderMail(messages, now) {
           <div class="from">${escapeHtml(message.peer_id.slice(0, 16))}&hellip;
             &middot; ${escapeHtml(relativeTime(Math.max(0, now - message.created_at)))}</div>
           <div class="body">${escapeHtml(message.body)}</div>
+          <div class="actions">
+            <button type="button" class="danger" data-delete-mail="${message.id}">Delete</button>
+          </div>
         </article>`,
         )
         .join("")
@@ -201,8 +205,32 @@ function renderDoctor(report) {
     `${checks}<div class="verdict">${escapeHtml(report.verdict)}</div>`;
 }
 
-function renderChannels(channels) {
+function renderGuestbook(entries) {
+  document.getElementById("guestbook-meta").textContent =
+    entries.length === 0 ? "empty" : `${entries.length} entr${entries.length === 1 ? "y" : "ies"}`;
+
+  document.getElementById("guestbook").innerHTML = entries.length
+    ? entries
+        .map(
+          (entry) => `
+        <article class="letter">
+          <div class="from">
+            <img class="identicon" src="/identicon/${escapeHtml(entry.from)}.svg" alt=""
+                 width="18" height="18" loading="lazy">
+            ${escapeHtml(entry.fingerprint)}
+          </div>
+          <div class="body">${escapeHtml(entry.body)}</div>
+        </article>`,
+        )
+        .join("")
+    : '<p class="empty">Nobody has signed your guestbook yet.</p>';
+}
+
+function renderChannels(allChannels, status) {
   const tabs = document.getElementById("channel-tabs");
+  // Our own guestbook has a panel of its own; listing it here as well would
+  // just be the same thing twice.
+  const channels = allChannels.filter((c) => c.channel_id !== status.guestbook_channel);
 
   if (!selectedChannelId && channels.length) {
     const neighborhood = channels.find((c) => !c.is_private) || channels[0];
@@ -269,7 +297,8 @@ async function refresh() {
     renderMe(state.status);
     renderRosters(state.peers, state.status);
     renderMail(state.mail, state.status.now);
-    renderChannels(await getJson("/api/channels"));
+    renderChannels(await getJson("/api/channels"), state.status);
+    renderGuestbook(await getJson("/api/guestbook"));
     await refreshChannel();
   } catch (err) {
     document.querySelector(".presence").classList.remove("live");
@@ -314,6 +343,29 @@ document.addEventListener("click", async (event) => {
   const tab = event.target.closest("[data-channel]");
   if (tab) {
     selectedChannelId = tab.dataset.channel;
+    await refresh();
+    return;
+  }
+
+  const signButton = event.target.closest("[data-sign]");
+  if (signButton) {
+    const note = window.prompt("What would you like to write in their guestbook?");
+    if (!note || !note.trim()) return;
+    signButton.disabled = true;
+    const response = await fetch(`/api/guestbook/${signButton.dataset.sign}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body: note }),
+    });
+    document.getElementById("say-result").textContent = await response.text();
+    signButton.disabled = false;
+    return;
+  }
+
+  const deleteMail = event.target.closest("[data-delete-mail]");
+  if (deleteMail) {
+    deleteMail.disabled = true;
+    await fetch(`/api/mail/${deleteMail.dataset.deleteMail}/delete`, { method: "POST" });
     await refresh();
     return;
   }

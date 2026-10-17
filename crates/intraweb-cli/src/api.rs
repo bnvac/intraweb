@@ -62,6 +62,9 @@ struct Status {
     hubs_online: usize,
     known_peers: u64,
     unread_mail: u64,
+    /// Our own guestbook, so the dashboard can give it its own panel instead
+    /// of leaving it among the channel tabs.
+    guestbook_channel: String,
     vault_path: String,
     site_path: String,
     uptime_secs: u64,
@@ -91,6 +94,7 @@ fn status_of(state: &AppState) -> Status {
         peers_online: state.roster.len(),
         hubs_online: state.roster.hubs().len(),
         known_peers,
+        guestbook_channel: ChannelId::guestbook_of(state.identity.peer_id()).to_hex(),
         unread_mail: state
             .store
             .lock()
@@ -573,6 +577,66 @@ async fn put_profile(State(state): State<AppState>, body: String) -> impl IntoRe
     }
 }
 
+// ---- guestbook ------------------------------------------------------------
+
+/// What neighbors have written in our book.
+async fn read_guestbook(State(state): State<AppState>) -> impl IntoResponse {
+    let book = ChannelId::guestbook_of(state.identity.peer_id());
+    let entries = state
+        .store
+        .lock()
+        .ok()
+        .and_then(|store| store.posts(book, 100).ok())
+        .unwrap_or_default();
+    axum::Json(entries)
+}
+
+/// Write in a neighbor's book.
+async fn sign_guestbook(
+    State(state): State<AppState>,
+    Path(peer_hex): Path<String>,
+    body: String,
+) -> impl IntoResponse {
+    let Some(peer_id) = PeerId::parse_hex(&peer_hex) else {
+        return (StatusCode::BAD_REQUEST, "not a valid peer id").into_response();
+    };
+    let Ok(said) = serde_json::from_str::<SayBody>(&body) else {
+        return (StatusCode::BAD_REQUEST, "could not read that").into_response();
+    };
+    if said.body.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "write something first").into_response();
+    }
+    let Some(owner) = state
+        .roster
+        .peers()
+        .into_iter()
+        .find(|p| p.peer_id == peer_id)
+    else {
+        return (StatusCode::BAD_REQUEST, "that neighbor is not in range").into_response();
+    };
+
+    match crate::channels::sign_guestbook(&state.store, &state.identity, &owner, &said.body).await {
+        Ok(()) => (
+            StatusCode::OK,
+            format!("signed {}'s guestbook", owner.nickname),
+        )
+            .into_response(),
+        Err(err) => (StatusCode::BAD_REQUEST, format!("{err:#}")).into_response(),
+    }
+}
+
+/// Throw one of our own messages away.
+async fn delete_mail(State(state): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
+    let Ok(store) = state.store.lock() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "the mail store is busy").into_response();
+    };
+    match store.delete_mail(id) {
+        Ok(true) => (StatusCode::OK, "deleted").into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no such message").into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
 // ---- channels -------------------------------------------------------------
 
 /// Take a post from another node.
@@ -614,7 +678,11 @@ async fn receive_post(State(state): State<AppState>, body: String) -> impl IntoR
 
     // A private channel we were never invited to is somebody else's business;
     // do not accumulate their traffic.
-    if !channel.is_neighborhood() && !known.iter().any(|c| c.channel_id == channel) {
+    // Our own guestbook is always open: that is the point of having one.
+    let is_ours = channel.is_neighborhood()
+        || channel.is_guestbook_of(state.identity.peer_id())
+        || known.iter().any(|c| c.channel_id == channel);
+    if !is_ours {
         return (StatusCode::NOT_FOUND, "no such channel here").into_response();
     }
 
@@ -841,6 +909,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/mail/send", post(send_mail))
         .route("/api/mail/outbox", get(outbox))
         .route("/api/mail/read", post(mark_all_read))
+        .route("/api/mail/{id}/delete", post(delete_mail))
+        .route("/api/guestbook", get(read_guestbook))
+        .route("/api/guestbook/{peer}", post(sign_guestbook))
         .route("/api/files", get(shared_files))
         .route("/api/channels", get(list_channels))
         .route("/api/channels/new", post(new_channel))

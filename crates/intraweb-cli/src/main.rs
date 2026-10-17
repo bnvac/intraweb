@@ -93,6 +93,15 @@ enum Command {
         #[arg(long, short, value_name = "CHANNEL")]
         channel: Option<String>,
     },
+    /// Write in a neighbor's guestbook.
+    Sign {
+        /// Nickname, fingerprint, or public key.
+        peer: String,
+        /// What to write.
+        message: Vec<String>,
+    },
+    /// Read your own guestbook.
+    Guestbook,
     /// Read a channel.
     Chat {
         /// Which channel, by name or id. Defaults to the neighborhood.
@@ -156,6 +165,14 @@ enum MailCmd {
     Inbox,
     /// Show what you have sent, and what is still waiting.
     Outbox,
+    /// Reply to a message, by the number shown in the inbox.
+    Reply {
+        id: i64,
+        #[arg(long, short)]
+        message: Option<String>,
+    },
+    /// Throw a message away.
+    Delete { id: i64 },
 }
 
 #[derive(Args)]
@@ -227,6 +244,8 @@ async fn run() -> Result<()> {
             say_command(vault, &message.join(" "), channel.as_deref()).await
         }
         Command::Chat { channel } => chat_command(vault, channel.as_deref()),
+        Command::Sign { peer, message } => sign_command(vault, &peer, &message.join(" ")).await,
+        Command::Guestbook => guestbook_command(vault),
         Command::Channel { cmd } => channel_command(vault, cmd).await,
         Command::Get { peer, file, output } => get_command(vault, &peer, &file, output).await,
         Command::Doctor { listen } => doctor(vault, listen).await,
@@ -297,6 +316,7 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
     }
 
     channels::ensure_neighborhood(&store)?;
+    channels::ensure_guestbook(&store, &identity)?;
 
     let node = Node::start(&config, Arc::clone(&identity), Arc::clone(&store))
         .context("could not start discovery")?;
@@ -584,7 +604,8 @@ async fn mail_command(vault: Vault, cmd: MailCmd) -> Result<()> {
             for message in &messages {
                 let unread = if message.read_at.is_none() { "*" } else { " " };
                 println!(
-                    "{unread} {}  {}",
+                    "{unread} [{}] {}  {}",
+                    message.id,
                     message.peer_id.fingerprint(),
                     if message.subject.is_empty() {
                         "(no subject)"
@@ -598,6 +619,84 @@ async fn mail_command(vault: Vault, cmd: MailCmd) -> Result<()> {
                 println!();
             }
             store.mark_all_read(now_secs())?;
+            Ok(())
+        }
+
+        MailCmd::Reply { id, message } => {
+            let (original, body) = {
+                let body = match message {
+                    Some(body) => body,
+                    None => {
+                        use std::io::Read;
+                        let mut buf = String::new();
+                        std::io::stdin()
+                            .read_to_string(&mut buf)
+                            .context("could not read stdin")?;
+                        buf
+                    }
+                };
+                let store = store
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("the mail store is busy"))?;
+                let original = store
+                    .mail_by_id(id)?
+                    .with_context(|| format!("there is no message {id}"))?;
+                (original, body)
+            };
+
+            let subject = if original.subject.starts_with("re: ") {
+                original.subject.clone()
+            } else {
+                format!("re: {}", original.subject)
+            };
+
+            let queued_id = mail::queue(
+                &store,
+                identity.peer_id(),
+                original.peer_id,
+                &subject,
+                &body,
+            )?;
+
+            // Try now; a running node keeps retrying if this misses.
+            let live = peers_now(&vault, &config, &identity, &store, 3).await?;
+            let delivered = match live.iter().find(|p| p.peer_id == original.peer_id) {
+                Some(peer) => {
+                    let sealed = intraweb_core::SignedMail::seal(
+                        intraweb_core::Mail::new(
+                            identity.peer_id(),
+                            original.peer_id,
+                            &subject,
+                            &body,
+                            now_secs(),
+                        ),
+                        &identity,
+                    )?;
+                    mail::deliver_one(peer, &sealed).await.is_ok()
+                }
+                None => false,
+            };
+
+            if delivered {
+                if let Ok(store) = store.lock() {
+                    store.mark_delivered(queued_id, now_secs()).ok();
+                }
+                println!("Replied to {}.", original.peer_id.fingerprint());
+            } else {
+                println!("Reply queued for {}.", original.peer_id.fingerprint());
+            }
+            Ok(())
+        }
+
+        MailCmd::Delete { id } => {
+            let store = store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("the mail store is busy"))?;
+            if store.delete_mail(id)? {
+                println!("Deleted message {id}.");
+            } else {
+                println!("There is no message {id}.");
+            }
             Ok(())
         }
 
@@ -721,6 +820,42 @@ fn chat_command(vault: Vault, channel: Option<&str>) -> Result<()> {
                 post.fingerprint
             );
         }
+    }
+    Ok(())
+}
+
+async fn sign_command(vault: Vault, query: &str, message: &str) -> Result<()> {
+    anyhow::ensure!(!message.trim().is_empty(), "write something to leave");
+
+    let (identity, config, _) = open_vault(&vault)?;
+    let store = Arc::new(Mutex::new(Store::open(&vault.db_path())?));
+    let config = Arc::new(config);
+
+    let live = peers_now(&vault, &config, &identity, &store, 3).await?;
+    let owner = mail::resolve_or_explain(&live, query)?;
+
+    channels::sign_guestbook(&store, &identity, &owner, message).await?;
+
+    println!("Signed {}'s guestbook.", owner.nickname);
+    Ok(())
+}
+
+fn guestbook_command(vault: Vault) -> Result<()> {
+    let (identity, _, _) = open_vault(&vault)?;
+    let store = Arc::new(Mutex::new(Store::open(&vault.db_path())?));
+    channels::ensure_guestbook(&store, &identity)?;
+
+    let store = store
+        .lock()
+        .map_err(|_| anyhow::anyhow!("the store is busy"))?;
+    let entries = store.posts(ChannelId::guestbook_of(identity.peer_id()), 100)?;
+    if entries.is_empty() {
+        println!("Nobody has signed your guestbook yet.");
+        println!("Neighbors can with: intraweb sign <you> \"...\"");
+        return Ok(());
+    }
+    for entry in entries {
+        println!("{}  {}", entry.fingerprint, entry.body);
     }
     Ok(())
 }

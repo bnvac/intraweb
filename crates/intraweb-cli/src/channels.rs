@@ -40,18 +40,30 @@ pub async fn say_to(
     channel: ChannelId,
     body: &str,
 ) -> Result<Delivery> {
-    let (channel_key, members) = {
+    let (channel_key, members, is_known_public) = {
         let store = store
             .lock()
             .map_err(|_| anyhow::anyhow!("the store is busy"))?;
-        (store.channel_key(channel)?, store.members(channel)?)
+        let known_public = store
+            .channels()?
+            .into_iter()
+            .any(|c| c.channel_id == channel && !c.is_private);
+        (
+            store.channel_key(channel)?,
+            store.members(channel)?,
+            known_public,
+        )
     };
 
+    let is_private = channel_key.is_some();
     let post = match channel_key {
         Some(key) => Post::private(channel, identity.peer_id(), &key, body)?,
         None => {
+            // Posting in the clear is only right where the channel is meant
+            // to be readable: the neighborhood, or a guestbook. Anywhere else
+            // a missing key means we were never admitted.
             anyhow::ensure!(
-                channel.is_neighborhood(),
+                channel.is_neighborhood() || is_known_public,
                 "you do not hold that channel's key, so you cannot post to it",
             );
             Post::public(channel, identity.peer_id(), body)
@@ -68,13 +80,17 @@ pub async fn say_to(
         store.store_post(&sealed, body, true)?;
     }
 
-    let recipients: Vec<&Peer> = if channel.is_neighborhood() {
-        peers.iter().collect()
-    } else {
+    // Narrowing to members is how a private channel stays private, so it
+    // applies to private channels only. A public one -- the neighborhood, or
+    // somebody's guestbook -- goes to whoever was asked for; a guestbook
+    // signer holds no member list for a book that is not theirs.
+    let recipients: Vec<&Peer> = if is_private {
         peers
             .iter()
             .filter(|p| members.contains(&p.peer_id))
             .collect()
+    } else {
+        peers.iter().collect()
     };
 
     let mut reached = 0;
@@ -205,6 +221,54 @@ pub async fn invite(
     Ok(())
 }
 
+/// Sign somebody's guestbook.
+///
+/// A guestbook is a public channel whose id is derived from its owner's key,
+/// so this is an ordinary post that happens to go to exactly one node.
+pub async fn sign_guestbook(
+    store: &Arc<Mutex<Store>>,
+    identity: &Identity,
+    owner: &Peer,
+    body: &str,
+) -> Result<()> {
+    let channel = ChannelId::guestbook_of(owner.peer_id);
+
+    {
+        let store = store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the store is busy"))?;
+        store.upsert_channel(
+            channel,
+            &format!("{}'s guestbook", owner.nickname),
+            false,
+            None,
+            now_secs(),
+        )?;
+    }
+
+    let delivery = say_to(store, identity, std::slice::from_ref(owner), channel, body).await?;
+    anyhow::ensure!(
+        delivery.reached > 0,
+        "could not reach {} to leave that",
+        owner.nickname
+    );
+    Ok(())
+}
+
+/// Make sure our own guestbook exists, so entries have somewhere to land.
+pub fn ensure_guestbook(store: &Mutex<Store>, identity: &Identity) -> Result<()> {
+    let store = store
+        .lock()
+        .map_err(|_| anyhow::anyhow!("the store is busy"))?;
+    store.upsert_channel(
+        ChannelId::guestbook_of(identity.peer_id()),
+        "my guestbook",
+        false,
+        None,
+        now_secs(),
+    )
+}
+
 /// Make sure the neighborhood channel exists in this vault.
 pub fn ensure_neighborhood(store: &Mutex<Store>) -> Result<()> {
     let store = store
@@ -285,6 +349,52 @@ mod tests {
                 .unwrap()[0]
                 .body,
             "anyone?"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_public_channel_is_not_narrowed_to_members() {
+        // Regression: signing a guestbook reached nobody, because delivery was
+        // filtered by a member list the signer has no reason to hold.
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let alice = Identity::generate().unwrap();
+        let bob = Identity::generate().unwrap();
+        let book = ChannelId::guestbook_of(bob.peer_id());
+
+        store
+            .lock()
+            .unwrap()
+            .upsert_channel(book, "bob's guestbook", false, None, 100)
+            .unwrap();
+
+        // A peer who is not a recorded member of this book. Delivery must be
+        // attempted anyway -- it fails only because nothing is listening on
+        // that port, which is what proves the member filter did not drop it.
+        let stranger = Peer {
+            peer_id: bob.peer_id(),
+            encryption_key: None,
+            fingerprint: bob.peer_id().fingerprint(),
+            nickname: "bob".into(),
+            addrs: vec![std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)],
+            api_port: 1,
+            is_hub: false,
+            hub_name: None,
+            source: intraweb_core::DiscoverySource::Mdns,
+            trust: intraweb_core::TrustState::Known,
+            first_seen: 0,
+            last_seen: 0,
+        };
+
+        let delivery = say_to(&store, &alice, &[stranger], book, "nice page")
+            .await
+            .unwrap();
+        assert_eq!(
+            delivery.missed, 1,
+            "it must try, not silently skip a non-member"
+        );
+        assert_eq!(
+            store.lock().unwrap().posts(book, 10).unwrap()[0].body,
+            "nice page"
         );
     }
 

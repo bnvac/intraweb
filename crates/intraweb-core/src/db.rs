@@ -510,6 +510,27 @@ impl Store {
         Ok(total as u64)
     }
 
+    /// One message by its id, for replying to it or showing it alone.
+    pub fn mail_by_id(&self, id: i64) -> Result<Option<StoredMail>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, peer_id, subject, body, created_at, delivered_at, read_at
+                 FROM mail WHERE id = ?1",
+                params![id],
+                stored_mail,
+            )
+            .optional()?)
+    }
+
+    /// Throw a message away. Yours to delete: nobody else holds your copy.
+    pub fn delete_mail(&self, id: i64) -> Result<bool> {
+        let changed = self
+            .conn
+            .execute("DELETE FROM mail WHERE id = ?1", params![id])?;
+        Ok(changed > 0)
+    }
+
     pub fn unread_count(&self) -> Result<u64> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM mail WHERE direction = 'in' AND read_at IS NULL",
@@ -1131,6 +1152,43 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.inbox(10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_message_can_be_read_back_and_thrown_away() {
+        let store = Store::open_in_memory().unwrap();
+        let (alice, bob) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        store
+            .store_incoming(&letter(&alice, &bob, "fuel", "thursday", 100), 100)
+            .unwrap();
+
+        let id = store.inbox(10).unwrap()[0].id;
+        assert_eq!(store.mail_by_id(id).unwrap().unwrap().subject, "fuel");
+
+        assert!(store.delete_mail(id).unwrap());
+        assert!(store.inbox(10).unwrap().is_empty());
+        assert!(store.mail_by_id(id).unwrap().is_none());
+        assert!(
+            !store.delete_mail(id).unwrap(),
+            "deleting twice is not an error"
+        );
+    }
+
+    #[test]
+    fn deleting_a_message_lets_the_sender_resend_it() {
+        // The duplicate guard is an index on what we hold; throwing a message
+        // away should not make it undeliverable forever.
+        let store = Store::open_in_memory().unwrap();
+        let (alice, bob) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let sealed = letter(&alice, &bob, "fuel", "thursday", 100);
+
+        store.store_incoming(&sealed, 100).unwrap();
+        store.delete_mail(store.inbox(10).unwrap()[0].id).unwrap();
+
+        assert!(
+            store.store_incoming(&sealed, 200).unwrap(),
+            "it can arrive again"
+        );
     }
 
     #[test]

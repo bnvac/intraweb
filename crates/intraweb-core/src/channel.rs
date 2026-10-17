@@ -26,6 +26,9 @@ const INVITE_DOMAIN: &str = "intraweb-invite-v1";
 /// The neighborhood channel's id is fixed, so every node computes the same one
 /// without anybody creating or announcing it.
 const NEIGHBORHOOD_LABEL: &[u8] = b"intraweb-neighborhood-channel-v1";
+/// A guestbook is a public channel belonging to one key, so its id is derived
+/// from that key. Anyone can compute where to sign; only the owner keeps it.
+const GUESTBOOK_LABEL: &[u8] = b"intraweb-guestbook-v1";
 
 /// Identifies a channel. Random for a private one, fixed for the public one.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -39,6 +42,23 @@ impl ChannelId {
 
     pub fn is_neighborhood(&self) -> bool {
         *self == Self::neighborhood()
+    }
+
+    /// The channel that is somebody's guestbook.
+    ///
+    /// A guestbook needs no new machinery: it is a public channel whose id
+    /// everybody can derive from the owner's key, so signing it reuses the
+    /// same signed posts, deduplication, rate limiting and blocking as any
+    /// other channel.
+    pub fn guestbook_of(owner: PeerId) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(GUESTBOOK_LABEL);
+        hasher.update(owner.as_bytes());
+        Self(hasher.finalize().into())
+    }
+
+    pub fn is_guestbook_of(&self, owner: PeerId) -> bool {
+        *self == Self::guestbook_of(owner)
     }
 
     pub fn new_private() -> Result<Self> {
@@ -305,6 +325,30 @@ mod tests {
         // Nobody creates it and nobody announces it; it simply is.
         assert_eq!(ChannelId::neighborhood(), ChannelId::neighborhood());
         assert!(ChannelId::neighborhood().is_neighborhood());
+    }
+
+    #[test]
+    fn a_guestbook_belongs_to_exactly_one_key() {
+        let (alice, bob) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+
+        // Anybody can work out where to sign, without being told.
+        assert_eq!(
+            ChannelId::guestbook_of(alice.peer_id()),
+            ChannelId::guestbook_of(alice.peer_id()),
+        );
+        assert_ne!(
+            ChannelId::guestbook_of(alice.peer_id()),
+            ChannelId::guestbook_of(bob.peer_id()),
+        );
+
+        assert!(ChannelId::guestbook_of(alice.peer_id()).is_guestbook_of(alice.peer_id()));
+        assert!(!ChannelId::guestbook_of(alice.peer_id()).is_guestbook_of(bob.peer_id()));
+    }
+
+    #[test]
+    fn a_guestbook_is_not_the_neighborhood_channel() {
+        let alice = Identity::generate().unwrap();
+        assert!(!ChannelId::guestbook_of(alice.peer_id()).is_neighborhood());
     }
 
     #[test]
