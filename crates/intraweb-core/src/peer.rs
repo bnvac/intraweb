@@ -1,6 +1,7 @@
 //! Peer records and the trust states the dashboard renders.
 
 use crate::identity::PeerId;
+use crate::sealed::EncryptionKey;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
@@ -61,6 +62,11 @@ impl TrustState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Peer {
     pub peer_id: PeerId,
+    /// Their announced public encryption key, for sealing a channel key to
+    /// them. `None` for somebody known only from the keyring: you cannot seal
+    /// a secret to a key you have never seen, so inviting them has to wait
+    /// until they are in range.
+    pub encryption_key: Option<EncryptionKey>,
     /// Short digest for reading aloud when verifying out of band.
     pub fingerprint: String,
     pub nickname: String,
@@ -123,6 +129,9 @@ mod tests {
         let peer_id = Identity::generate().unwrap().peer_id();
         Peer {
             peer_id,
+            encryption_key: Some(
+                crate::sealed::SealingKey::derive(&Identity::generate().unwrap()).public(),
+            ),
             fingerprint: peer_id.fingerprint(),
             nickname: "ben".into(),
             addrs,

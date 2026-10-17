@@ -182,6 +182,9 @@ pub fn addressable(live: &[Peer], store: &Mutex<Store>) -> Vec<Peer> {
         }
         peers.push(Peer {
             peer_id: entry.peer_id,
+            // Known only from the keyring, so their encryption key is unknown
+            // and they cannot be invited to a private channel until seen.
+            encryption_key: None,
             fingerprint: entry.peer_id.fingerprint(),
             nickname: entry.nickname,
             addrs: Vec::new(),
@@ -209,6 +212,8 @@ pub fn peer_from_key(query: &str) -> Option<Peer> {
     let peer_id = PeerId::parse_hex(query.trim())?;
     Some(Peer {
         peer_id,
+        // A key written on paper says nothing about their encryption key.
+        encryption_key: None,
         fingerprint: peer_id.fingerprint(),
         nickname: peer_id.fingerprint(),
         addrs: Vec::new(),
@@ -263,6 +268,9 @@ mod tests {
         let peer_id = Identity::generate().unwrap().peer_id();
         Peer {
             peer_id,
+            encryption_key: Some(
+                intraweb_core::SealingKey::derive(&Identity::generate().unwrap()).public(),
+            ),
             fingerprint: peer_id.fingerprint(),
             nickname: nickname.to_string(),
             addrs: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))],

@@ -10,7 +10,9 @@
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD_NO_PAD as B64;
+use intraweb_core::EncryptionKey;
 use intraweb_core::identity::{Identity, PeerId, SIG_LEN};
+use intraweb_core::sealed::SealingKey;
 use intraweb_core::{PROTOCOL_VERSION, peer::now_secs};
 use std::collections::HashMap;
 
@@ -34,6 +36,11 @@ const SIGNING_DOMAIN: &str = "intraweb-presence-v1";
 pub struct Presence {
     pub version: u16,
     pub peer_id: PeerId,
+    /// Announced so a private channel's key can be sealed to this peer without
+    /// a separate exchange. Derived from the same vault seed but independent
+    /// of the signing key, and covered by the signature, so the binding
+    /// between the two keys is authenticated.
+    pub encryption_key: EncryptionKey,
     pub nickname: String,
     pub api_port: u16,
     pub is_hub: bool,
@@ -52,6 +59,7 @@ impl Presence {
         Self {
             version: PROTOCOL_VERSION,
             peer_id: identity.peer_id(),
+            encryption_key: SealingKey::derive(identity).public(),
             nickname: scrub(nickname),
             api_port,
             is_hub,
@@ -68,9 +76,10 @@ impl Presence {
     /// ambiguous by a hostile nickname.
     pub fn signing_bytes(&self) -> Vec<u8> {
         format!(
-            "{SIGNING_DOMAIN}|{}|{}|{}|{}|{}|{}|{}",
+            "{SIGNING_DOMAIN}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.version,
             self.peer_id.to_hex(),
+            self.encryption_key.to_hex(),
             self.nickname,
             self.api_port,
             u8::from(self.is_hub),
@@ -104,6 +113,7 @@ impl Presence {
         HashMap::from([
             ("v".into(), self.version.to_string()),
             ("pk".into(), self.peer_id.to_hex()),
+            ("ek".into(), self.encryption_key.to_hex()),
             ("nick".into(), self.nickname.clone()),
             ("api".into(), self.api_port.to_string()),
             ("hub".into(), u8::from(self.is_hub).to_string()),
@@ -124,6 +134,7 @@ impl Presence {
         let presence = Self {
             version: get("v")?.parse().context("bad version")?,
             peer_id: PeerId::parse_hex(&get("pk")?).context("bad public key")?,
+            encryption_key: EncryptionKey::parse_hex(&get("ek")?).context("bad encryption key")?,
             nickname: scrub(&get("nick")?),
             api_port: get("api")?.parse().context("bad api port")?,
             is_hub: get("hub")? == "1",
@@ -196,12 +207,12 @@ impl Presence {
     fn from_signing_str(body: &str) -> Result<Self> {
         let parts: Vec<&str> = body.split('|').collect();
         ensure!(
-            parts.len() == 8,
-            "presence record has {} fields, expected 8",
+            parts.len() == 9,
+            "presence record has {} fields, expected 9",
             parts.len()
         );
         ensure!(parts[0] == SIGNING_DOMAIN, "unexpected signing domain");
-        let is_hub = match parts[5] {
+        let is_hub = match parts[6] {
             "0" => false,
             "1" => true,
             other => bail!("bad hub flag {other:?}"),
@@ -209,11 +220,12 @@ impl Presence {
         Ok(Self {
             version: parts[1].parse().context("bad version")?,
             peer_id: PeerId::parse_hex(parts[2]).context("bad public key")?,
-            nickname: parts[3].to_string(),
-            api_port: parts[4].parse().context("bad api port")?,
+            encryption_key: EncryptionKey::parse_hex(parts[3]).context("bad encryption key")?,
+            nickname: parts[4].to_string(),
+            api_port: parts[5].parse().context("bad api port")?,
             is_hub,
-            hub_name: parts[6].to_string(),
-            timestamp: parts[7].parse().context("bad timestamp")?,
+            hub_name: parts[7].to_string(),
+            timestamp: parts[8].parse().context("bad timestamp")?,
         })
     }
 }

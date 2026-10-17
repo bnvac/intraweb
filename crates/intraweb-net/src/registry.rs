@@ -126,6 +126,7 @@ impl PeerRegistry {
         match self.peers.get_mut(&presence.peer_id) {
             Some(existing) => {
                 existing.nickname = presence.nickname.clone();
+                existing.encryption_key = Some(presence.encryption_key);
                 existing.api_port = presence.api_port;
                 existing.is_hub = presence.is_hub;
                 existing.hub_name = hub_name(presence);
@@ -148,6 +149,7 @@ impl PeerRegistry {
                     presence.peer_id,
                     Peer {
                         peer_id: presence.peer_id,
+                        encryption_key: Some(presence.encryption_key),
                         fingerprint: presence.peer_id.fingerprint(),
                         nickname: presence.nickname.clone(),
                         addrs,

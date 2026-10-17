@@ -350,6 +350,9 @@ mod tests {
         let peer_id = Identity::generate().unwrap().peer_id();
         let peer = Peer {
             peer_id,
+            encryption_key: Some(
+                intraweb_core::SealingKey::derive(&Identity::generate().unwrap()).public(),
+            ),
             fingerprint: peer_id.fingerprint(),
             nickname: "ghost".into(),
             addrs: vec![],
@@ -372,6 +375,9 @@ mod tests {
         let peer_id = Identity::generate().unwrap().peer_id();
         let peer = Peer {
             peer_id,
+            encryption_key: Some(
+                intraweb_core::SealingKey::derive(&Identity::generate().unwrap()).public(),
+            ),
             fingerprint: peer_id.fingerprint(),
             nickname: "quiet".into(),
             // Port 1 on loopback: nothing is listening there.

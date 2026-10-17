@@ -27,10 +27,13 @@ pub use vault::{Runtime, Vault};
 /// Wire-protocol version. Bumped when the discovery payload changes shape, so
 /// a node from a future release is skipped rather than misread.
 ///
+/// v3 announces an encryption key alongside the identity, so a private
+/// channel's key can be sealed to a member without a separate exchange.
+///
 /// v2 dropped the separate transport port: mail and file transfer ride the
 /// node's own HTTP port, which already gives resumable ranged downloads and
 /// keeps every exchange on one directly-dialled socket.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// mDNS service type every node registers and browses for.
 pub const SERVICE_TYPE: &str = "_intraweb._tcp.local.";
