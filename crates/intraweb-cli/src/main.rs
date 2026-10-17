@@ -1,6 +1,7 @@
 //! intraweb -- your neighborhood web.
 
 mod api;
+mod channels;
 mod guard;
 mod http;
 mod limits;
@@ -10,6 +11,7 @@ mod tui;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
+use intraweb_core::channel::ChannelId;
 use intraweb_core::peer::{Peer, now_secs};
 use intraweb_core::{Config, Identity, Runtime, Store, Vault};
 use intraweb_net::Node;
@@ -83,6 +85,24 @@ enum Command {
         #[arg(long, short, value_name = "PATH")]
         output: Option<PathBuf>,
     },
+    /// Say something in the neighborhood channel.
+    Say {
+        /// What to say.
+        message: Vec<String>,
+        /// Post to a private channel instead, by name or id.
+        #[arg(long, short, value_name = "CHANNEL")]
+        channel: Option<String>,
+    },
+    /// Read a channel.
+    Chat {
+        /// Which channel, by name or id. Defaults to the neighborhood.
+        channel: Option<String>,
+    },
+    /// Make and manage private channels.
+    Channel {
+        #[command(subcommand)]
+        cmd: ChannelCmd,
+    },
     /// Refuse to see or hear from somebody.
     Block {
         /// Nickname, fingerprint, or public key.
@@ -100,6 +120,24 @@ enum Command {
     Blocked,
     /// Print your identity and where your vault lives.
     Id,
+}
+
+#[derive(Subcommand)]
+enum ChannelCmd {
+    /// Start a private channel. Only people you invite can read it.
+    New {
+        /// What to call it.
+        name: Vec<String>,
+    },
+    /// Show the channels this vault knows about.
+    List,
+    /// Let somebody into a private channel. They must be in range.
+    Invite {
+        /// Channel name or id.
+        channel: String,
+        /// Nickname, fingerprint, or public key.
+        peer: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -185,6 +223,11 @@ async fn run() -> Result<()> {
         Command::Block { peer, reason } => block_command(vault, &peer, &reason).await,
         Command::Unblock { peer } => unblock_command(vault, &peer).await,
         Command::Blocked => blocked_command(vault),
+        Command::Say { message, channel } => {
+            say_command(vault, &message.join(" "), channel.as_deref()).await
+        }
+        Command::Chat { channel } => chat_command(vault, channel.as_deref()),
+        Command::Channel { cmd } => channel_command(vault, cmd).await,
         Command::Get { peer, file, output } => get_command(vault, &peer, &file, output).await,
         Command::Doctor { listen } => doctor(vault, listen).await,
         Command::Id => show_id(vault),
@@ -252,6 +295,8 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
             vault.root().display()
         );
     }
+
+    channels::ensure_neighborhood(&store)?;
 
     let node = Node::start(&config, Arc::clone(&identity), Arc::clone(&store))
         .context("could not start discovery")?;
@@ -581,6 +626,155 @@ async fn mail_command(vault: Vault, cmd: MailCmd) -> Result<()> {
                     },
                 );
             }
+            Ok(())
+        }
+    }
+}
+
+/// Find a channel by name or id, so people can type what they see.
+fn resolve_channel(store: &Mutex<Store>, query: Option<&str>) -> Result<ChannelId> {
+    let Some(query) = query else {
+        return Ok(ChannelId::neighborhood());
+    };
+    let needle = query.trim().to_lowercase();
+
+    if let Some(channel) = ChannelId::parse_hex(&needle) {
+        return Ok(channel);
+    }
+
+    let store = store
+        .lock()
+        .map_err(|_| anyhow::anyhow!("the store is busy"))?;
+    let channels = store.channels()?;
+    let matches: Vec<_> = channels
+        .iter()
+        .filter(|c| c.name.to_lowercase() == needle || c.channel_id.short().starts_with(&needle))
+        .collect();
+
+    match matches.as_slice() {
+        [only] => Ok(only.channel_id),
+        [] => {
+            let names: Vec<&str> = channels.iter().map(|c| c.name.as_str()).collect();
+            anyhow::bail!(
+                "no channel called {query:?}. You have: {}",
+                names.join(", ")
+            )
+        }
+        several => {
+            let mut lines = vec![format!("{} channels match {query:?}:", several.len())];
+            for channel in several {
+                lines.push(format!(
+                    "  {}  {}",
+                    channel.channel_id.short(),
+                    channel.name
+                ));
+            }
+            anyhow::bail!("{}", lines.join("\n"))
+        }
+    }
+}
+
+async fn say_command(vault: Vault, message: &str, channel: Option<&str>) -> Result<()> {
+    anyhow::ensure!(!message.trim().is_empty(), "nothing to say");
+
+    let (identity, config, _) = open_vault(&vault)?;
+    let store = Arc::new(Mutex::new(Store::open(&vault.db_path())?));
+    let config = Arc::new(config);
+    channels::ensure_neighborhood(&store)?;
+
+    let target = resolve_channel(&store, channel)?;
+
+    // Speaking needs to know who is in range, so discovery runs first.
+    let live = peers_now(&vault, &config, &identity, &store, 3).await?;
+    let delivery = channels::say_to(&store, &identity, &live, target, message).await?;
+
+    if delivery.reached == 0 {
+        println!("Said it, but nobody was in range to hear. It is in your own log.");
+    } else {
+        println!("Said to {} neighbor(s).", delivery.reached);
+    }
+    if delivery.missed > 0 {
+        println!("{} could not be reached.", delivery.missed);
+    }
+    Ok(())
+}
+
+fn chat_command(vault: Vault, channel: Option<&str>) -> Result<()> {
+    let store = Arc::new(Mutex::new(Store::open(&vault.db_path())?));
+    channels::ensure_neighborhood(&store)?;
+    let target = resolve_channel(&store, channel)?;
+
+    let store = store
+        .lock()
+        .map_err(|_| anyhow::anyhow!("the store is busy"))?;
+    let posts = store.posts(target, 60)?;
+    if posts.is_empty() {
+        println!("Nothing said here yet.");
+        return Ok(());
+    }
+    for post in posts {
+        if post.readable {
+            println!("{}  {}", post.fingerprint, post.body);
+        } else {
+            println!(
+                "{}  [encrypted -- you are not in this channel]",
+                post.fingerprint
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn channel_command(vault: Vault, cmd: ChannelCmd) -> Result<()> {
+    let (identity, config, _) = open_vault(&vault)?;
+    let store = Arc::new(Mutex::new(Store::open(&vault.db_path())?));
+    let config = Arc::new(config);
+    channels::ensure_neighborhood(&store)?;
+
+    match cmd {
+        ChannelCmd::New { name } => {
+            let name = name.join(" ");
+            anyhow::ensure!(!name.trim().is_empty(), "give the channel a name");
+            let channel = channels::create_private(&store, &identity, &name)?;
+
+            println!("Created {name} ({}).", channel.short());
+            println!("Nobody else can read it until you invite them:");
+            println!("  intraweb channel invite {name:?} <neighbor>");
+            Ok(())
+        }
+        ChannelCmd::List => {
+            let store = store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("the store is busy"))?;
+            for channel in store.channels()? {
+                let kind = if channel.is_private {
+                    "private"
+                } else {
+                    "public "
+                };
+                let note = if channel.can_read {
+                    ""
+                } else {
+                    "  (you cannot read this one)"
+                };
+                println!(
+                    "  {}  {kind}  {}{note}",
+                    channel.channel_id.short(),
+                    channel.name
+                );
+            }
+            Ok(())
+        }
+        ChannelCmd::Invite { channel, peer } => {
+            let target = resolve_channel(&store, Some(&channel))?;
+            let live = peers_now(&vault, &config, &identity, &store, 3).await?;
+            let invitee = mail::resolve_or_explain(&live, &peer)?;
+
+            let sealing = intraweb_core::SealingKey::derive(&identity);
+            channels::invite(&store, &identity, &sealing, target, &invitee).await?;
+
+            println!("Invited {} ({}).", invitee.nickname, invitee.fingerprint);
+            println!("They can now read everything said in that channel from here on.");
             Ok(())
         }
     }

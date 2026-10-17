@@ -16,8 +16,10 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use intraweb_core::SignedMail;
+use intraweb_core::channel::{ChannelId, Invite, SignedPost};
 use intraweb_core::identity::PeerId;
 use intraweb_core::peer::now_secs;
+use intraweb_core::sealed::SealingKey;
 use intraweb_core::{Config, Identity, Store, Vault};
 use intraweb_net::Roster;
 use serde::Serialize;
@@ -490,6 +492,239 @@ fn guarded_dir(
         .service(ServeDir::new(&root))
 }
 
+// ---- channels -------------------------------------------------------------
+
+/// Take a post from another node.
+///
+/// Verified first, then through the same gates as mail: a blocked key gets
+/// nowhere and a flood is throttled. A post for a private channel we hold no
+/// key for is stored as ciphertext and marked unreadable, so it is kept
+/// honestly rather than displayed as something we cannot actually read.
+async fn receive_post(State(state): State<AppState>, body: String) -> impl IntoResponse {
+    let sealed: SignedPost = match serde_json::from_str(&body) {
+        Ok(post) => post,
+        Err(err) => {
+            return (StatusCode::BAD_REQUEST, format!("unreadable post: {err}")).into_response();
+        }
+    };
+
+    if sealed.accept().is_err() {
+        return (
+            StatusCode::FORBIDDEN,
+            "that post is not signed by who it claims",
+        )
+            .into_response();
+    }
+
+    let author = sealed.post.from;
+    if state.roster.is_blocked(author) {
+        return (StatusCode::FORBIDDEN, "refused").into_response();
+    }
+    if !state.limiter.allow(author, crate::limits::now_float()) {
+        return (StatusCode::TOO_MANY_REQUESTS, "slow down").into_response();
+    }
+
+    let Ok(store) = state.store.lock() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "the store is busy").into_response();
+    };
+
+    let channel = sealed.post.channel;
+    let known = store.channels().unwrap_or_default();
+
+    // A private channel we were never invited to is somebody else's business;
+    // do not accumulate their traffic.
+    if !channel.is_neighborhood() && !known.iter().any(|c| c.channel_id == channel) {
+        return (StatusCode::NOT_FOUND, "no such channel here").into_response();
+    }
+
+    let (body_to_store, readable) = match store.channel_key(channel) {
+        Ok(Some(key)) => match sealed.post.open(&key) {
+            Ok(plain) => (plain, true),
+            Err(_) => (sealed.post.body.clone(), false),
+        },
+        _ if sealed.post.encrypted => (sealed.post.body.clone(), false),
+        _ => (sealed.post.body.clone(), true),
+    };
+
+    match store.store_post(&sealed, &body_to_store, readable) {
+        Ok(filed) => {
+            if filed {
+                tracing::info!(
+                    from = %author.fingerprint(),
+                    channel = %channel.short(),
+                    "post received",
+                );
+            }
+            (StatusCode::OK, "filed").into_response()
+        }
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+/// Take an invitation to a private channel.
+async fn receive_invite(State(state): State<AppState>, body: String) -> impl IntoResponse {
+    let invite: Invite = match serde_json::from_str(&body) {
+        Ok(invite) => invite,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("unreadable invitation: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    if state.roster.is_blocked(invite.from) {
+        return (StatusCode::FORBIDDEN, "refused").into_response();
+    }
+
+    // Opening what they sealed needs the encryption key they announce.
+    let Some(inviter) = state
+        .roster
+        .peers()
+        .into_iter()
+        .find(|p| p.peer_id == invite.from)
+    else {
+        return (StatusCode::BAD_REQUEST, "we cannot see whoever sent that").into_response();
+    };
+    let Some(inviter_key) = inviter.encryption_key else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "that peer announces no encryption key",
+        )
+            .into_response();
+    };
+
+    let sealing = SealingKey::derive(&state.identity);
+    let channel_key = match invite.accept(state.identity.peer_id(), &sealing, &inviter_key) {
+        Ok(key) => key,
+        Err(err) => {
+            tracing::debug!(%err, "refused an invitation");
+            return (StatusCode::FORBIDDEN, format!("refused: {err}")).into_response();
+        }
+    };
+
+    let Ok(store) = state.store.lock() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "the store is busy").into_response();
+    };
+    let now = now_secs();
+    if let Err(err) = store
+        .upsert_channel(invite.channel, &invite.name, true, Some(&channel_key), now)
+        .and_then(|()| store.add_member(invite.channel, state.identity.peer_id(), now))
+        .and_then(|()| store.add_member(invite.channel, invite.from, now))
+    {
+        return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+    }
+
+    tracing::info!(channel = %invite.name, from = %invite.from.fingerprint(), "invited to a channel");
+    (StatusCode::OK, "joined").into_response()
+}
+
+async fn list_channels(State(state): State<AppState>) -> impl IntoResponse {
+    let channels = state
+        .store
+        .lock()
+        .ok()
+        .and_then(|store| store.channels().ok())
+        .unwrap_or_default();
+    axum::Json(channels)
+}
+
+async fn channel_posts(
+    State(state): State<AppState>,
+    Path(channel_hex): Path<String>,
+) -> impl IntoResponse {
+    let Some(channel) = ChannelId::parse_hex(&channel_hex) else {
+        return (StatusCode::BAD_REQUEST, "not a valid channel id").into_response();
+    };
+    let posts = state
+        .store
+        .lock()
+        .ok()
+        .and_then(|store| store.posts(channel, 200).ok())
+        .unwrap_or_default();
+    axum::Json(posts).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct SayBody {
+    body: String,
+}
+
+async fn say_in_channel(
+    State(state): State<AppState>,
+    Path(channel_hex): Path<String>,
+    body: String,
+) -> impl IntoResponse {
+    let Some(channel) = ChannelId::parse_hex(&channel_hex) else {
+        return (StatusCode::BAD_REQUEST, "not a valid channel id").into_response();
+    };
+    let Ok(said) = serde_json::from_str::<SayBody>(&body) else {
+        return (StatusCode::BAD_REQUEST, "could not read that").into_response();
+    };
+    if said.body.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "nothing to say").into_response();
+    }
+
+    match crate::channels::say(
+        &state.store,
+        &state.identity,
+        &state.roster,
+        channel,
+        &said.body,
+    )
+    .await
+    {
+        Ok(delivery) => (
+            StatusCode::OK,
+            format!("said to {} neighbor(s)", delivery.reached),
+        )
+            .into_response(),
+        Err(err) => (StatusCode::BAD_REQUEST, format!("{err:#}")).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct NewChannel {
+    name: String,
+}
+
+async fn new_channel(State(state): State<AppState>, body: String) -> impl IntoResponse {
+    let Ok(request) = serde_json::from_str::<NewChannel>(&body) else {
+        return (StatusCode::BAD_REQUEST, "could not read that").into_response();
+    };
+    match crate::channels::create_private(&state.store, &state.identity, &request.name) {
+        Ok(channel) => (StatusCode::OK, channel.to_hex()).into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")).into_response(),
+    }
+}
+
+async fn invite_to_channel(
+    State(state): State<AppState>,
+    Path((channel_hex, peer_hex)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let (Some(channel), Some(peer_id)) = (
+        ChannelId::parse_hex(&channel_hex),
+        PeerId::parse_hex(&peer_hex),
+    ) else {
+        return (StatusCode::BAD_REQUEST, "not a valid channel or peer").into_response();
+    };
+    let Some(peer) = state
+        .roster
+        .peers()
+        .into_iter()
+        .find(|p| p.peer_id == peer_id)
+    else {
+        return (StatusCode::BAD_REQUEST, "that neighbor is not in range").into_response();
+    };
+
+    let sealing = SealingKey::derive(&state.identity);
+    match crate::channels::invite(&state.store, &state.identity, &sealing, channel, &peer).await {
+        Ok(()) => (StatusCode::OK, format!("invited {}", peer.nickname)).into_response(),
+        Err(err) => (StatusCode::BAD_REQUEST, format!("{err:#}")).into_response(),
+    }
+}
+
 pub fn router(state: AppState) -> Router {
     let nickname = state.config.sanitized_nickname();
 
@@ -524,6 +759,16 @@ pub fn router(state: AppState) -> Router {
         .route("/api/mail/outbox", get(outbox))
         .route("/api/mail/read", post(mark_all_read))
         .route("/api/files", get(shared_files))
+        .route("/api/channels", get(list_channels))
+        .route("/api/channels/new", post(new_channel))
+        .route("/api/channels/post", post(receive_post))
+        .route("/api/channels/invite", post(receive_invite))
+        .route("/api/channels/{channel}/posts", get(channel_posts))
+        .route("/api/channels/{channel}/say", post(say_in_channel))
+        .route(
+            "/api/channels/{channel}/invite/{peer}",
+            post(invite_to_channel),
+        )
         .route("/api/peers/{peer_id}/verify", post(verify_peer))
         .route("/api/peers/{peer_id}/block", post(block_peer))
         .route("/api/peers/{peer_id}/unblock", post(unblock_peer))

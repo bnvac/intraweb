@@ -300,7 +300,11 @@ impl Store {
 
     pub fn channels(&self) -> Result<Vec<ChannelRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT channel_id, name, is_private, channel_key IS NOT NULL, created_at
+            // A public channel needs no key, so "can read" is not the same
+            // question as "holds a key" -- asking only the latter labelled the
+            // neighborhood channel unreadable.
+            "SELECT channel_id, name, is_private,
+                    (is_private = 0 OR channel_key IS NOT NULL) AS can_read, created_at
              FROM channels ORDER BY is_private, name",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -987,6 +991,31 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.channel_key(channel).unwrap(), Some(key));
+    }
+
+    #[test]
+    fn a_public_channel_reads_as_readable() {
+        // It holds no key because it needs none; that is not the same as
+        // being unable to read it.
+        let store = Store::open_in_memory().unwrap();
+        store
+            .upsert_channel(ChannelId::neighborhood(), "neighborhood", false, None, 100)
+            .unwrap();
+
+        let public = &store.channels().unwrap()[0];
+        assert!(public.can_read);
+        assert!(!public.is_private);
+    }
+
+    #[test]
+    fn a_private_channel_without_its_key_reads_as_unreadable() {
+        let store = Store::open_in_memory().unwrap();
+        let theirs = ChannelId::new_private().unwrap();
+        store
+            .upsert_channel(theirs, "theirs", true, None, 100)
+            .unwrap();
+
+        assert!(!store.channels().unwrap()[0].can_read);
     }
 
     #[test]

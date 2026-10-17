@@ -23,6 +23,14 @@ pub struct Roster {
 }
 
 impl Roster {
+    /// A roster with nobody in it, for tests and for commands that act on a
+    /// peer list they gathered themselves.
+    pub fn empty(self_id: intraweb_core::PeerId) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(PeerRegistry::new(self_id, 30))),
+        }
+    }
+
     pub fn peers(&self) -> Vec<Peer> {
         self.inner
             .read()
