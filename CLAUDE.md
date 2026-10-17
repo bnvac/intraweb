@@ -44,6 +44,20 @@ peer, no relay — and it buys ranged, resumable downloads for nothing, because
 `ServeDir` already implements them. Do not reintroduce a bespoke transport; if
 something needs a new verb, it is an HTTP route.
 
+## Keys
+
+Two keys per vault, and they are not interchangeable:
+
+- **Ed25519**, in `identity.key`: who you are. Signs everything.
+- **X25519**, derived from the same seed by HKDF with a domain label: how a
+  secret is sealed to you. Announced in presence so a channel key can be
+  sealed without a separate exchange.
+
+Never sign with the encryption key or encrypt with the signing key. The
+Ed25519 library says plainly not to reuse a signing key for key agreement and
+points at the research; deriving keeps one file to back up while keeping the
+key material independent.
+
 ## Rules that are easy to get wrong
 
 1. **Verify before you record.** Anything arriving from the network is hostile
@@ -95,7 +109,33 @@ something needs a new verb, it is an HTTP route.
 14. **A local trust decision applies immediately.** Throttled write-through
     means the next sighting would otherwise restore the stale value, so
     verifying calls `Roster::note_verified` as well as the store.
-15. **Tests never assume an empty network.** The machine running them may have
+15. **A private channel is encrypted, not merely addressed carefully.** Posts
+    cross the same open network as everything else, where anyone with the wifi
+    password is listening. Delivering only to members would be a promise the
+    wire does not keep.
+16. **Narrowing delivery to members is for private channels only.** It is a
+    privacy mechanism, not a routing one. Applying it to public channels broke
+    guestbooks, because a signer holds no member list for somebody else's book.
+    (Real bug, named regression test.)
+17. **A guestbook is a public channel derived from its owner's key.** It needs
+    no new envelope, storage or rate limiting; reuse the channel machinery.
+    `ChannelId::guestbook_of` is how anyone works out where to sign.
+18. **An attachment is a reference, never a copy.** The bytes stay with the
+    sender until fetched. Its path is covered by the signature and checked for
+    `..` before signing, so a message cannot be repointed at another file or
+    name something outside the shared folder.
+19. **Cross-site writes are refused.** Any page the operator visits can POST to
+    localhost; before this existed such a request queued mail signed with their
+    key. Browsers attach `Origin` to a cross-site write, and a mismatch is a
+    403. Peers and the CLI send none and are unaffected. (Demonstrated hole.)
+20. **File requests are canonicalised before they are served.** `ServeDir`
+    blocks `..` but follows symlinks, so a link in `files/` served
+    `/etc/passwd`. Anything resolving outside the published folder is a 404.
+    (Demonstrated hole.)
+21. **A rate limit needs a global bucket.** Identities are free to mint, so a
+    per-sender limit alone is theatre: a flooder uses a fresh key each time.
+    The map of remembered senders is capped for the same reason.
+22. **Tests never assume an empty network.** The machine running them may have
     real nodes on it. Assert invariants (a warning always carries a remedy; the
     verdict follows from the counts), not specific peer counts.
 
@@ -130,6 +170,15 @@ running it and kills your own command. Use `pkill -x intraweb`.
 `cargo fmt` reflows code, so a scripted string replacement written against
 pre-format source will silently miss. Format first, then patch, then re-check —
 a signature change whose body edit missed compiles perfectly and does nothing.
+A script making several such edits and writing once at the end writes nothing
+at all when one anchor misses; verify each edit landed.
+
+Commit each working piece. An hour of channel work was lost to a container
+rebuild because it was held uncommitted.
+
+Headless Chromium clamps its viewport to about 485px, so a narrower
+`--window-size` crops a wider render rather than laying out for a phone. It
+looks like an overflow bug and is not one.
 
 CI runs `cargo fmt --all -- --check`, clippy with `-D warnings`, and the full
 suite. All three must be clean before pushing.

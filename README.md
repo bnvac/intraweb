@@ -83,6 +83,11 @@ intraweb mail send bob -m "hi"     # write to a neighbor
 intraweb mail                      # read what you have been sent
 intraweb ls bob                    # what is bob sharing?
 intraweb get bob maps/ridge.pdf    # fetch it (resumes if interrupted)
+intraweb say "gate is open"        # the neighborhood channel
+intraweb chat                      # read it
+intraweb channel new ridge crew    # a private channel, encrypted
+intraweb sign bob "thanks!"        # write in a neighbor's guestbook
+intraweb block someone             # stop seeing or hearing from a key
 intraweb doctor                    # why can't I see anyone?
 intraweb id                        # my fingerprint, for verifying in person
 ```
@@ -161,13 +166,52 @@ to theirs. A neighbor that is announcing but not answering is listed as such
 instead of being hidden, and a name that has changed keys carries a warning with
 the fingerprint you need to tell the two apart.
 
+## Channels
+
+```sh
+intraweb say "road past the ridge is open"   # everyone in range
+intraweb chat                                 # read the neighborhood
+intraweb channel new ridge crew               # start a private one
+intraweb channel invite "ridge crew" bob      # let bob in
+intraweb say -c "ridge crew" "gate code 4471" # members only
+```
+
+Saying something hands it to each recipient's node directly. No hub carries a
+channel and no server keeps the history: every node holds what it was told,
+which also means a node that was switched off misses what was said. That is
+the honest cost of having nowhere central to ask.
+
+Private channels are **encrypted**, not merely delivered carefully. Posts
+cross the same open network as everything else, where anyone holding the wifi
+password is listening, so member-only delivery alone would be a promise the
+wire does not keep. Inviting somebody seals the channel key to the encryption
+key they announce — which means they have to be in range, since there is no
+sealing a secret to a key you have never seen.
+
+## Guestbooks
+
+```sh
+intraweb sign alice "thanks for the radio relay"
+intraweb guestbook        # read your own
+```
+
+A guestbook is just a public channel whose address is derived from its
+owner's key, so anyone can work out where to sign without being told.
+
 ## Mail
 
 ```sh
 intraweb mail send alice -s "fuel drop" -m "Thursday 0600."
+intraweb mail send alice -m "see attached" -a maps/ridge.tif
 intraweb mail            # inbox
+intraweb mail reply 3 -m "on my way"
+intraweb mail delete 3
 intraweb mail outbox     # including anything still queued
 ```
+
+An attachment is a reference, not a copy. The message names a file in your
+shared folder and the bytes stay with you until they fetch them, so a large
+attachment costs nothing to send and the fetch resumes like any download.
 
 Every message is signed with your key, so the sender cannot be forged, and goes
 straight to the recipient's node. Nothing passes through a hub.
@@ -194,6 +238,18 @@ so file size does not decide whether a transfer succeeds.
 
 Anything you drop in your vault's `files/` folder is what neighbors see here.
 
+## Who is who
+
+Every key gets a picture drawn from it, shown beside the name everywhere.
+Fingerprints are the honest way to tell two people apart and nobody reads
+them — people skim the first group and stop, which is exactly the gap a
+ground lookalike key walks through. A changed picture is far harder to miss
+than `09fc-d332` becoming `09fc-d441`. It is a reading aid, not a security
+boundary: confirming somebody still means comparing the fingerprint.
+
+Drop an image named `avatar.png` in your vault to use your own picture
+instead. Edit your name and a line about yourself from the dashboard.
+
 ## Trust
 
 There are no passwords, and no certificate authority — neither would mean much
@@ -214,6 +270,19 @@ fingerprint  ba10-4253-4e1b-194a
 ```
 
 Then mark them verified (`v` in the terminal UI, or the button in the dashboard).
+
+intraweb also watches for a key whose fingerprint *opens* like one you already
+know. A full collision is out of reach, but grinding until the first group or
+two match is cheap, so a near miss is flagged rather than quietly shown.
+
+If somebody will not leave you alone:
+
+```sh
+intraweb block someone
+```
+
+They are dropped from your roster and their mail, posts and invitations are
+refused at the door.
 
 ## When nobody shows up
 

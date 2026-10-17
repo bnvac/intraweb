@@ -8,9 +8,9 @@ Running log of decisions, open questions, and known gaps. Append; do not rewrite
 | --- | --- | --- |
 | P0 | Discovery, identity, roster, both dashboards, doctor | **done** |
 | P1 | Local mail, store-and-forward, signed | **done** |
-| P2 | Mini-site publishing from the dashboard | partly — `serve` does it from the CLI; no upload UI |
+| P2 | Mini-site publishing | partly — `serve` from the CLI; no upload UI |
 | P3 | Resumable direct file transfer | **done** — ranged HTTP, `ls` / `get` |
-| P4 | Mail attachments (P1 ∪ P3) | not started |
+| P4 | Mail attachments | **done** — sender-held references |
 | — | Release CI, cross-compiled musl + macOS binaries | **done** |
 
 Schema is at v2: v1 created the keyring and the mail table, v2 added unread
@@ -45,6 +45,47 @@ from the first release opens without the operator doing anything.
   lands; transport port 8421 is announced but nothing listens on it until P1;
   beacon replay is bounded only by a 300s clock-skew window, which is
   proportionate for LAN presence but is not a nonce.
+<!-- MEMORY_UPDATE_END -->
+
+<!-- MEMORY_UPDATE_START -->
+### Update: 2026-10-17 (security, channels, profiles)
+* **Decisions/Changes**: Two vulnerabilities found by attacking a running node
+  rather than reading code, both fixed with named regression tests: a symlink
+  in `files/` served `/etc/passwd` (ServeDir blocks `..` but follows links),
+  and any website could POST to localhost and queue mail signed with the
+  operator's key. Requests are now canonicalised before serving, and
+  cross-origin writes are refused by Origin check.
+  On impersonation: a fingerprint is public and cannot be used to sign as you,
+  so the real attack is grinding a key whose fingerprint *opens* like a known
+  one. New keys are checked against the keyring for a shared prefix and a near
+  miss is flagged; blocking is durable and refuses mail, posts and invitations.
+  Rate limiting spends from a **global** bucket as well as a per-sender one,
+  because identities are free to mint.
+  Channels added. A private channel is encrypted under a channel key, not
+  merely delivered to members, since posts cross an open network. The
+  encryption key is a **separate** X25519 key derived from the vault seed by
+  HKDF — the Ed25519 library explicitly warns against reusing a signing key
+  for key agreement. Presence announces it (protocol v3).
+  A guestbook turned out to need no new machinery: it is a public channel whose
+  id derives from the owner's key, reusing signed posts, dedupe, rate limiting
+  and blocking.
+  Every key now has an identicon, because people compare pictures far more
+  reliably than hex. Avatars override it; the identicon is the always-present
+  fallback. Profiles are served over HTTP per node rather than announced,
+  because presence rides in a 1024-byte datagram.
+  Attachments are references: the file stays with the sender and the fetch is
+  the existing ranged download, so it resumes.
+* **Known Bugs/Gaps**: Bugs found and fixed this pass — delivery narrowed to
+  members broke guestbooks (narrowing is for private channels only); an
+  explicit CSS `display` beat the `hidden` attribute so the profile editor was
+  never hidden; `can_read` asked "holds a key" and so labelled the public
+  channel unreadable; the guestbook appeared both as a channel tab and its own
+  panel. Still open: no upload UI for sites; `surf` re-probes without caching;
+  beacon replay is bounded by a 300s clock-skew window rather than a nonce;
+  channel history does not backfill, so a node that was off misses what was
+  said; a renamed nickname is only announced after a restart.
+* **Process**: An hour of uncommitted channel work was lost to a container
+  rebuild. Commit each working piece.
 <!-- MEMORY_UPDATE_END -->
 
 <!-- MEMORY_UPDATE_START -->
