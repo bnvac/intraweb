@@ -3,6 +3,7 @@
 //! This is also the trust-on-first-use keyring. The job it does that matters
 //! is noticing when a familiar nickname turns up carrying an unfamiliar key.
 
+use crate::channel::{ChannelId, SignedPost};
 use crate::identity::PeerId;
 use crate::mail::{Mail, SignedMail};
 use crate::peer::TrustState;
@@ -10,7 +11,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 pub struct Store {
     conn: Connection,
@@ -49,7 +50,12 @@ impl Store {
         let current: i64 = self
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
-        for (version, sql) in [(1, SCHEMA_V1), (2, SCHEMA_V2), (3, SCHEMA_V3)] {
+        for (version, sql) in [
+            (1, SCHEMA_V1),
+            (2, SCHEMA_V2),
+            (3, SCHEMA_V3),
+            (4, SCHEMA_V4),
+        ] {
             if current >= version {
                 continue;
             }
@@ -267,6 +273,151 @@ impl Store {
             .collect())
     }
 
+    // ---- channels ---------------------------------------------------------
+
+    /// Remember a channel, or update what we know about it.
+    pub fn upsert_channel(
+        &self,
+        channel_id: ChannelId,
+        name: &str,
+        is_private: bool,
+        channel_key: Option<&[u8; 32]>,
+        now: u64,
+    ) -> Result<()> {
+        let key_hex = channel_key.map(|k| crate::hex::encode(k));
+        self.conn.execute(
+            "INSERT INTO channels (channel_id, name, is_private, channel_key, created_at, joined_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(channel_id) DO UPDATE SET
+                name = ?2,
+                -- Never drop a key we hold by hearing about the channel again
+                -- from somebody who cannot read it.
+                channel_key = COALESCE(?4, channel_key)",
+            params![channel_id.to_hex(), name, is_private as i64, key_hex, now as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn channels(&self) -> Result<Vec<ChannelRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT channel_id, name, is_private, channel_key IS NOT NULL, created_at
+             FROM channels ORDER BY is_private, name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let hex: String = row.get(0)?;
+            Ok(ChannelRecord {
+                channel_id: ChannelId::parse_hex(&hex).unwrap_or_else(ChannelId::neighborhood),
+                name: row.get(1)?,
+                is_private: row.get::<_, i64>(2)? != 0,
+                can_read: row.get::<_, i64>(3)? != 0,
+                created_at: row.get::<_, i64>(4)? as u64,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The key for a private channel, if we have been admitted to it.
+    pub fn channel_key(&self, channel_id: ChannelId) -> Result<Option<[u8; 32]>> {
+        let stored: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT channel_key FROM channels WHERE channel_id = ?1",
+                params![channel_id.to_hex()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(stored
+            .flatten()
+            .and_then(|hex| crate::hex::decode_array::<32>(&hex)))
+    }
+
+    pub fn add_member(&self, channel_id: ChannelId, peer_id: PeerId, now: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO channel_members (channel_id, peer_id, added_at)
+             VALUES (?1, ?2, ?3)",
+            params![channel_id.to_hex(), peer_id.to_hex(), now as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_member(&self, channel_id: ChannelId, peer_id: PeerId) -> Result<bool> {
+        let changed = self.conn.execute(
+            "DELETE FROM channel_members WHERE channel_id = ?1 AND peer_id = ?2",
+            params![channel_id.to_hex(), peer_id.to_hex()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn members(&self, channel_id: ChannelId) -> Result<Vec<PeerId>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT peer_id FROM channel_members WHERE channel_id = ?1")?;
+        let rows = stmt.query_map(params![channel_id.to_hex()], |row| row.get::<_, String>(0))?;
+        Ok(rows
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .filter_map(|hex| PeerId::parse_hex(hex))
+            .collect())
+    }
+
+    pub fn is_member(&self, channel_id: ChannelId, peer_id: PeerId) -> Result<bool> {
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM channel_members WHERE channel_id = ?1 AND peer_id = ?2",
+                params![channel_id.to_hex(), peer_id.to_hex()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    /// File a post. Returns false when we already hold it.
+    pub fn store_post(&self, sealed: &SignedPost, body: &str, readable: bool) -> Result<bool> {
+        let changed = self.conn.execute(
+            "INSERT OR IGNORE INTO channel_posts
+                (channel_id, from_peer, body, readable, created_at, signature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                sealed.post.channel.to_hex(),
+                sealed.post.from.to_hex(),
+                body,
+                readable as i64,
+                sealed.post.created_at as i64,
+                sealed.signature,
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Recent messages, oldest first so they read as a conversation.
+    pub fn posts(&self, channel_id: ChannelId, limit: u32) -> Result<Vec<StoredPost>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, channel_id, from_peer, body, readable, created_at FROM (
+                 SELECT id, channel_id, from_peer, body, readable, created_at
+                 FROM channel_posts WHERE channel_id = ?1
+                 ORDER BY created_at DESC, id DESC LIMIT ?2
+             ) ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![channel_id.to_hex(), limit], |row| {
+            let channel_hex: String = row.get(1)?;
+            let from_hex: String = row.get(2)?;
+            let from =
+                PeerId::parse_hex(&from_hex).unwrap_or_else(|| PeerId::from_bytes([0u8; 32]));
+            Ok(StoredPost {
+                id: row.get(0)?,
+                channel_id: ChannelId::parse_hex(&channel_hex)
+                    .unwrap_or_else(ChannelId::neighborhood),
+                from,
+                fingerprint: from.fingerprint(),
+                body: row.get(3)?,
+                readable: row.get::<_, i64>(4)? != 0,
+                created_at: row.get::<_, i64>(5)? as u64,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     // ---- mail -------------------------------------------------------------
 
     /// Put a message in the outbox. Delivery happens when the recipient shows up.
@@ -396,6 +547,29 @@ fn stored_mail(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMail> {
 
 /// Somebody this vault has met before, whether or not they are in range now.
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct ChannelRecord {
+    pub channel_id: ChannelId,
+    pub name: String,
+    pub is_private: bool,
+    /// Whether we hold the key, i.e. whether we can read it.
+    pub can_read: bool,
+    pub created_at: u64,
+}
+
+/// One stored message.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StoredPost {
+    pub id: i64,
+    pub channel_id: ChannelId,
+    pub from: PeerId,
+    pub fingerprint: String,
+    pub body: String,
+    pub readable: bool,
+    pub created_at: u64,
+}
+
+/// A channel this vault knows about.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct KnownPeer {
     pub peer_id: PeerId,
     pub nickname: String,
@@ -462,6 +636,40 @@ CREATE INDEX IF NOT EXISTS idx_mail_pending
 "#;
 
 /// v3: fingerprints stored for lookalike detection, and a blocklist.
+const SCHEMA_V4: &str = r#"
+CREATE TABLE IF NOT EXISTS channels (
+    channel_id  TEXT    PRIMARY KEY,
+    name        TEXT    NOT NULL,
+    is_private  INTEGER NOT NULL DEFAULT 0,
+    -- Hex channel key; NULL for the public channel and for private channels
+    -- we have been told about but not admitted to.
+    channel_key TEXT,
+    created_at  INTEGER NOT NULL,
+    joined_at   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS channel_members (
+    channel_id TEXT    NOT NULL,
+    peer_id    TEXT    NOT NULL,
+    added_at   INTEGER NOT NULL,
+    PRIMARY KEY (channel_id, peer_id)
+);
+
+CREATE TABLE IF NOT EXISTS channel_posts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id TEXT    NOT NULL,
+    from_peer  TEXT    NOT NULL,
+    body       TEXT    NOT NULL,
+    -- 0 when it arrived encrypted and we hold no key for it.
+    readable   INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    signature  TEXT    NOT NULL
+);
+-- The same post reaches us from several members, and senders retry.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_unique ON channel_posts (signature);
+CREATE INDEX IF NOT EXISTS idx_posts_channel ON channel_posts (channel_id, created_at);
+"#;
+
 const SCHEMA_V3: &str = r#"
 ALTER TABLE known_peers ADD COLUMN fingerprint TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_known_peers_fingerprint ON known_peers (fingerprint);
@@ -697,6 +905,152 @@ mod tests {
             stored,
             alice.fingerprint(),
             "old rows are given their fingerprint"
+        );
+    }
+
+    fn post_from(who: &Identity, channel: ChannelId, body: &str) -> SignedPost {
+        SignedPost::seal(
+            crate::channel::Post::public(channel, who.peer_id(), body),
+            who,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn posts_come_back_oldest_first_so_they_read_as_a_conversation() {
+        let store = Store::open_in_memory().unwrap();
+        let channel = ChannelId::neighborhood();
+        let alice = Identity::generate().unwrap();
+
+        for (body, at) in [("first", 100), ("second", 200), ("third", 300)] {
+            let mut sealed = post_from(&alice, channel, body);
+            // Force distinct times regardless of how fast the test runs.
+            sealed.post.created_at = at;
+            store.store_post(&sealed, body, true).unwrap();
+        }
+
+        let bodies: Vec<String> = store
+            .posts(channel, 10)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.body)
+            .collect();
+        assert_eq!(bodies, vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn the_same_post_arriving_twice_is_filed_once() {
+        // Every member relays to every other, so duplicates are normal.
+        let store = Store::open_in_memory().unwrap();
+        let alice = Identity::generate().unwrap();
+        let sealed = post_from(&alice, ChannelId::neighborhood(), "hello");
+
+        assert!(store.store_post(&sealed, "hello", true).unwrap());
+        assert!(!store.store_post(&sealed, "hello", true).unwrap());
+        assert_eq!(store.posts(ChannelId::neighborhood(), 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn channels_are_kept_apart() {
+        let store = Store::open_in_memory().unwrap();
+        let alice = Identity::generate().unwrap();
+        let private = ChannelId::new_private().unwrap();
+
+        store
+            .store_post(
+                &post_from(&alice, ChannelId::neighborhood(), "public"),
+                "public",
+                true,
+            )
+            .unwrap();
+        store
+            .store_post(&post_from(&alice, private, "private"), "private", true)
+            .unwrap();
+
+        assert_eq!(store.posts(ChannelId::neighborhood(), 10).unwrap().len(), 1);
+        assert_eq!(store.posts(private, 10).unwrap()[0].body, "private");
+    }
+
+    #[test]
+    fn a_channel_key_is_never_lost_by_hearing_about_the_channel_again() {
+        // Somebody who cannot read the channel telling us it exists must not
+        // wipe the key that lets us read it.
+        let store = Store::open_in_memory().unwrap();
+        let channel = ChannelId::new_private().unwrap();
+        let key = crate::sealed::new_channel_key().unwrap();
+
+        store
+            .upsert_channel(channel, "ridge crew", true, Some(&key), 100)
+            .unwrap();
+        store
+            .upsert_channel(channel, "ridge crew", true, None, 200)
+            .unwrap();
+
+        assert_eq!(store.channel_key(channel).unwrap(), Some(key));
+    }
+
+    #[test]
+    fn membership_can_be_granted_and_revoked() {
+        let store = Store::open_in_memory().unwrap();
+        let channel = ChannelId::new_private().unwrap();
+        let (alice, bob) = (peer(), peer());
+        store
+            .upsert_channel(channel, "crew", true, None, 100)
+            .unwrap();
+
+        store.add_member(channel, alice, 100).unwrap();
+        store.add_member(channel, bob, 100).unwrap();
+        store.add_member(channel, bob, 110).unwrap(); // idempotent
+
+        assert_eq!(store.members(channel).unwrap().len(), 2);
+        assert!(store.is_member(channel, alice).unwrap());
+
+        assert!(store.remove_member(channel, alice).unwrap());
+        assert!(!store.is_member(channel, alice).unwrap());
+        assert_eq!(store.members(channel).unwrap(), vec![bob]);
+    }
+
+    #[test]
+    fn an_unreadable_post_is_kept_and_marked() {
+        // Arriving in a private channel we are not in: keep it, but be honest
+        // that we cannot show it.
+        let store = Store::open_in_memory().unwrap();
+        let alice = Identity::generate().unwrap();
+        let channel = ChannelId::new_private().unwrap();
+
+        store
+            .store_post(
+                &post_from(&alice, channel, "ciphertext"),
+                "ciphertext",
+                false,
+            )
+            .unwrap();
+
+        assert!(!store.posts(channel, 10).unwrap()[0].readable);
+    }
+
+    #[test]
+    fn a_vault_from_before_channels_existed_still_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("intraweb.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute_batch(SCHEMA_V2).unwrap();
+            conn.execute_batch(SCHEMA_V3).unwrap();
+            conn.pragma_update(None, "user_version", 3).unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let alice = Identity::generate().unwrap();
+        assert!(
+            store
+                .store_post(
+                    &post_from(&alice, ChannelId::neighborhood(), "hi"),
+                    "hi",
+                    true
+                )
+                .unwrap()
         );
     }
 
