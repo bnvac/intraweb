@@ -5,6 +5,7 @@
 //! `intraweb-net`'s job. Keeping the split lets the discovery layer be swapped
 //! or tested without touching identity or storage.
 
+pub mod channel;
 pub mod config;
 pub mod db;
 pub mod hex;
@@ -14,6 +15,7 @@ pub mod peer;
 pub mod sealed;
 pub mod vault;
 
+pub use channel::{ChannelId, Post, SignedPost};
 pub use config::Config;
 pub use db::Store;
 pub use identity::{Identity, PeerId};
