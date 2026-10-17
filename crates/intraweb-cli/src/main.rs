@@ -160,6 +160,10 @@ enum MailCmd {
         /// The message. Read from stdin when omitted.
         #[arg(long, short)]
         message: Option<String>,
+        /// Offer a file from your shared folder, by path. The bytes stay with
+        /// you until they fetch them.
+        #[arg(long, short = 'a', value_name = "PATH")]
+        attach: Option<String>,
     },
     /// Show what you have received.
     Inbox,
@@ -534,6 +538,7 @@ async fn mail_command(vault: Vault, cmd: MailCmd) -> Result<()> {
             to,
             subject,
             message,
+            attach,
         } => {
             let body = match message {
                 Some(body) => body,
@@ -550,26 +555,39 @@ async fn mail_command(vault: Vault, cmd: MailCmd) -> Result<()> {
             let live = peers_now(&vault, &config, &identity, &store, 3).await?;
             let recipient = mail::resolve_or_explain(&mail::addressable(&live, &store), &to)?;
 
+            // Offering a file we do not have would leave the recipient
+            // fetching a 404, so check before the message goes anywhere.
+            if let Some(path) = attach.as_deref() {
+                let full = vault.files_dir().join(path);
+                anyhow::ensure!(
+                    full.is_file(),
+                    "there is no {path} in your shared folder ({})",
+                    vault.files_dir().display(),
+                );
+            }
+
             let queued_id = mail::queue(
                 &store,
                 identity.peer_id(),
                 recipient.peer_id,
                 &subject,
                 &body,
+                attach.as_deref(),
             )?;
 
             // Try immediately; a running node keeps retrying if this misses.
             let delivered = {
-                let sealed = intraweb_core::SignedMail::seal(
-                    intraweb_core::Mail::new(
-                        identity.peer_id(),
-                        recipient.peer_id,
-                        &subject,
-                        &body,
-                        now_secs(),
-                    ),
-                    &identity,
-                )?;
+                let mut outgoing = intraweb_core::Mail::new(
+                    identity.peer_id(),
+                    recipient.peer_id,
+                    &subject,
+                    &body,
+                    now_secs(),
+                );
+                if let Some(path) = attach.as_deref() {
+                    outgoing = outgoing.with_attachment(path);
+                }
+                let sealed = intraweb_core::SignedMail::seal(outgoing, &identity)?;
                 mail::deliver_one(&recipient, &sealed).await.is_ok()
             };
 
@@ -616,6 +634,13 @@ async fn mail_command(vault: Vault, cmd: MailCmd) -> Result<()> {
                 for line in message.body.lines() {
                     println!("      {line}");
                 }
+                if let Some(path) = &message.attachment {
+                    println!("      attached: {path}");
+                    println!(
+                        "      fetch it with: intraweb get {} {path}",
+                        message.peer_id.fingerprint()
+                    );
+                }
                 println!();
             }
             store.mark_all_read(now_secs())?;
@@ -656,6 +681,7 @@ async fn mail_command(vault: Vault, cmd: MailCmd) -> Result<()> {
                 original.peer_id,
                 &subject,
                 &body,
+                None,
             )?;
 
             // Try now; a running node keeps retrying if this misses.

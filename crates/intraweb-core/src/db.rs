@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 pub struct Store {
     conn: Connection,
@@ -55,6 +55,7 @@ impl Store {
             (2, SCHEMA_V2),
             (3, SCHEMA_V3),
             (4, SCHEMA_V4),
+            (5, SCHEMA_V5),
         ] {
             if current >= version {
                 continue;
@@ -428,13 +429,14 @@ impl Store {
     pub fn queue_outgoing(&self, mail: &Mail) -> Result<i64> {
         mail.check_limits()?;
         self.conn.execute(
-            "INSERT INTO mail (direction, peer_id, subject, body, created_at)
-             VALUES ('out', ?1, ?2, ?3, ?4)",
+            "INSERT INTO mail (direction, peer_id, subject, body, created_at, attachment)
+             VALUES ('out', ?1, ?2, ?3, ?4, ?5)",
             params![
                 mail.to.to_hex(),
                 mail.subject,
                 mail.body,
-                mail.created_at as i64
+                mail.created_at as i64,
+                mail.attachment,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -443,7 +445,7 @@ impl Store {
     /// Messages still waiting for their recipient to appear.
     pub fn pending_outgoing(&self) -> Result<Vec<StoredMail>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, peer_id, subject, body, created_at, delivered_at, read_at
+            "SELECT id, peer_id, subject, body, created_at, delivered_at, read_at, attachment
              FROM mail WHERE direction = 'out' AND delivered_at IS NULL
              ORDER BY created_at",
         )?;
@@ -467,8 +469,9 @@ impl Store {
     pub fn store_incoming(&self, sealed: &SignedMail, now: u64) -> Result<bool> {
         let changed = self.conn.execute(
             "INSERT OR IGNORE INTO mail
-                (direction, peer_id, subject, body, created_at, delivered_at, signature)
-             VALUES ('in', ?1, ?2, ?3, ?4, ?5, ?6)",
+                (direction, peer_id, subject, body, created_at, delivered_at, signature,
+                 attachment)
+             VALUES ('in', ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 sealed.mail.from.to_hex(),
                 sealed.mail.subject,
@@ -476,6 +479,7 @@ impl Store {
                 sealed.mail.created_at as i64,
                 now as i64,
                 sealed.signature,
+                sealed.mail.attachment,
             ],
         )?;
         Ok(changed > 0)
@@ -483,7 +487,7 @@ impl Store {
 
     pub fn inbox(&self, limit: u32) -> Result<Vec<StoredMail>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, peer_id, subject, body, created_at, delivered_at, read_at
+            "SELECT id, peer_id, subject, body, created_at, delivered_at, read_at, attachment
              FROM mail WHERE direction = 'in' ORDER BY created_at DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit], stored_mail)?;
@@ -492,7 +496,7 @@ impl Store {
 
     pub fn outbox(&self, limit: u32) -> Result<Vec<StoredMail>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, peer_id, subject, body, created_at, delivered_at, read_at
+            "SELECT id, peer_id, subject, body, created_at, delivered_at, read_at, attachment
              FROM mail WHERE direction = 'out' ORDER BY created_at DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit], stored_mail)?;
@@ -515,7 +519,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, peer_id, subject, body, created_at, delivered_at, read_at
+                "SELECT id, peer_id, subject, body, created_at, delivered_at, read_at, attachment
                  FROM mail WHERE id = ?1",
                 params![id],
                 stored_mail,
@@ -567,6 +571,7 @@ fn stored_mail(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMail> {
         created_at: row.get::<_, i64>(4)? as u64,
         delivered_at: row.get::<_, Option<i64>>(5)?.map(|v| v as u64),
         read_at: row.get::<_, Option<i64>>(6)?.map(|v| v as u64),
+        attachment: row.get(7)?,
     })
 }
 
@@ -613,6 +618,8 @@ pub struct StoredMail {
     /// When it actually reached the recipient's node. `None` means still queued.
     pub delivered_at: Option<u64>,
     pub read_at: Option<u64>,
+    /// A file offered by the sender, by path in their shared folder.
+    pub attachment: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -661,6 +668,12 @@ CREATE INDEX IF NOT EXISTS idx_mail_pending
 "#;
 
 /// v3: fingerprints stored for lookalike detection, and a blocklist.
+/// v5: an attachment is a file in the sender's shared folder, named here.
+/// The bytes are never copied into the message.
+const SCHEMA_V5: &str = r#"
+ALTER TABLE mail ADD COLUMN attachment TEXT;
+"#;
+
 const SCHEMA_V4: &str = r#"
 CREATE TABLE IF NOT EXISTS channels (
     channel_id  TEXT    PRIMARY KEY,

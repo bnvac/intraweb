@@ -83,6 +83,18 @@ impl Vault {
         self.root.join("files")
     }
 
+    /// A picture you chose, if you put one in the vault.
+    ///
+    /// Any of the usual web formats, named `avatar`. Nothing is resized or
+    /// re-encoded: it is served exactly as it sits on disk, so what you put
+    /// there is what neighbors get.
+    pub fn avatar_path(&self) -> Option<PathBuf> {
+        ["png", "jpg", "jpeg", "webp", "gif", "svg"]
+            .iter()
+            .map(|ext| self.root.join(format!("avatar.{ext}")))
+            .find(|path| path.is_file())
+    }
+
     pub fn exists(&self) -> bool {
         self.identity_path().exists()
     }
@@ -168,6 +180,28 @@ mod tests {
         assert!(vault.site_dir().is_dir());
         assert!(vault.files_dir().is_dir());
         assert!(vault.site_dir().join("index.html").is_file());
+    }
+
+    #[test]
+    fn an_avatar_is_found_whatever_it_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::new(dir.path());
+        vault.ensure().unwrap();
+
+        assert!(vault.avatar_path().is_none(), "none by default");
+
+        std::fs::write(dir.path().join("avatar.webp"), b"not really a webp").unwrap();
+        assert_eq!(vault.avatar_path().unwrap().extension().unwrap(), "webp");
+    }
+
+    #[test]
+    fn a_directory_called_avatar_is_not_mistaken_for_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::new(dir.path());
+        vault.ensure().unwrap();
+        std::fs::create_dir(dir.path().join("avatar.png")).unwrap();
+
+        assert!(vault.avatar_path().is_none());
     }
 
     #[test]

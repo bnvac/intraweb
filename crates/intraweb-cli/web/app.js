@@ -87,7 +87,10 @@ function neighborCard(peer, rank, now) {
   return `
     <article class="${classes.join(" ")}">
       <span class="rank">${rank}</span>
-      <img class="identicon" src="/identicon/${escapeHtml(peer.peer_id)}.svg" alt="" loading="lazy">
+      <img class="identicon" alt="" loading="lazy"
+           src="${host ? `http://${host}:${peer.api_port}/avatar` : `/identicon/${escapeHtml(peer.peer_id)}.svg`}"
+           data-fallback="/identicon/${escapeHtml(peer.peer_id)}.svg"
+           onerror="this.onerror=null;this.src=this.dataset.fallback">
       <div class="neighbor-name">${escapeHtml(peer.nickname)} ${badges(peer)}</div>
       <div class="fp">${escapeHtml(peer.fingerprint)}</div>
       <div class="meta">
@@ -116,7 +119,13 @@ let selectedChannelId = null;
 let selectedChannel = null;
 
 function renderMe(status) {
-  document.getElementById("me-icon").src = `/identicon/${status.peer_id}.svg`;
+  const mine = document.getElementById("me-icon");
+  mine.dataset.fallback = `/identicon/${status.peer_id}.svg`;
+  mine.onerror = () => {
+    mine.onerror = null;
+    mine.src = mine.dataset.fallback;
+  };
+  mine.src = "/avatar";
   text("me-nickname", status.nickname);
   text("me-role", status.is_hub ? `hosting "${status.hub_name || ""}"` : "neighbor");
   text("me-fingerprint", status.fingerprint);
@@ -166,7 +175,23 @@ function renderRosters(peers, status) {
       }</p>`;
 }
 
-function renderMail(messages, now) {
+/// An attachment lives on the sender's node, so the link points there.
+/// Without their address there is nothing to link to, so say the name only.
+function attachmentLink(message, peers) {
+  if (!message.attachment) return "";
+
+  const sender = peers.find((p) => p.peer_id === message.peer_id);
+  const host = sender ? peerAddress(sender) : null;
+  const name = escapeHtml(message.attachment);
+
+  return host
+    ? `<div class="attachment">attached:
+         <a href="http://${host}:${sender.api_port}/files/${encodeURI(message.attachment)}"
+            target="_blank" rel="noopener">${name}</a></div>`
+    : `<div class="attachment">attached: ${name} <span class="aside-note">(sender is out of range)</span></div>`;
+}
+
+function renderMail(messages, now, peers) {
   const unread = messages.filter((m) => !m.read_at).length;
   text("mail-count", messages.length === 0 ? "empty" : `${messages.length} received${unread ? `, ${unread} unread` : ""}`);
 
@@ -179,6 +204,7 @@ function renderMail(messages, now) {
           <div class="from">${escapeHtml(message.peer_id.slice(0, 16))}&hellip;
             &middot; ${escapeHtml(relativeTime(Math.max(0, now - message.created_at)))}</div>
           <div class="body">${escapeHtml(message.body)}</div>
+          ${attachmentLink(message, peers)}
           <div class="actions">
             <button type="button" class="danger" data-delete-mail="${message.id}">Delete</button>
           </div>
@@ -296,7 +322,7 @@ async function refresh() {
     const state = await getJson("/api/state");
     renderMe(state.status);
     renderRosters(state.peers, state.status);
-    renderMail(state.mail, state.status.now);
+    renderMail(state.mail, state.status.now, state.peers);
     renderChannels(await getJson("/api/channels"), state.status);
     renderGuestbook(await getJson("/api/guestbook"));
     await refreshChannel();

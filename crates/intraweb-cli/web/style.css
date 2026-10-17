@@ -312,3 +312,6 @@ button.quiet:hover { border-color: var(--accent); filter: none; }
 }
 .letter .actions button.danger { color: var(--alarm); }
 .letter .from .identicon { vertical-align: -.2rem; margin-right: .25rem; }
+
+.attachment { margin-top: .4rem; font-size: .75rem; }
+.attachment .aside-note { display: inline; margin: 0; }

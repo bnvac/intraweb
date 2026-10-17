@@ -325,6 +325,7 @@ async fn send_mail(State(state): State<AppState>, body: String) -> impl IntoResp
         recipient.peer_id,
         &compose.subject,
         &compose.body,
+        None,
     ) {
         Ok(_) => (
             StatusCode::OK,
@@ -575,6 +576,32 @@ async fn put_profile(State(state): State<AppState>, body: String) -> impl IntoRe
             .into_response(),
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")).into_response(),
     }
+}
+
+/// The picture this node's owner chose, if they chose one.
+///
+/// 404 when they have not: the dashboard falls back to the identicon, which
+/// is drawn from the key and therefore always exists.
+async fn avatar(State(state): State<AppState>) -> impl IntoResponse {
+    let Some(path) = state.vault.avatar_path() else {
+        return (StatusCode::NOT_FOUND, "no avatar set").into_response();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return (StatusCode::NOT_FOUND, "no avatar set").into_response();
+    };
+
+    let kind = mime_guess::from_path(&path)
+        .first_or_octet_stream()
+        .to_string();
+    (
+        [
+            ("content-type", kind),
+            // A neighbor may change their picture, so do not hold it long.
+            ("cache-control", "public, max-age=300".to_string()),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 // ---- guestbook ------------------------------------------------------------
@@ -904,6 +931,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/doctor", get(doctor))
         .route("/api/profile", get(get_profile).post(put_profile))
         .route("/identicon/{peer}", get(identicon))
+        .route("/avatar", get(avatar))
         .route("/api/state", get(combined_state))
         .route("/api/mail", get(inbox).post(receive_mail))
         .route("/api/mail/send", post(send_mail))

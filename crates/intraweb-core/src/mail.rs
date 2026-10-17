@@ -17,7 +17,10 @@ use base64::engine::general_purpose::STANDARD_NO_PAD as B64;
 use serde::{Deserialize, Serialize};
 
 /// Bumped when the signed encoding changes.
-pub const MAIL_VERSION: u16 = 1;
+pub const MAIL_VERSION: u16 = 2;
+
+/// Longest attachment path we will carry.
+pub const MAX_ATTACHMENT_PATH: usize = 200;
 
 /// Domain separation, so a mail signature can never be replayed as a presence
 /// record or anything else we sign later.
@@ -35,6 +38,14 @@ pub struct Mail {
     pub subject: String,
     pub body: String,
     pub created_at: u64,
+    /// A file in the sender's shared folder, by path.
+    ///
+    /// The bytes stay with the sender and the recipient pulls them when they
+    /// want them. Nothing is copied into the message, so a large attachment
+    /// costs nothing until somebody asks for it, and the fetch is the ordinary
+    /// ranged download -- which means it resumes.
+    #[serde(default)]
+    pub attachment: Option<String>,
 }
 
 impl Mail {
@@ -46,7 +57,15 @@ impl Mail {
             subject: subject.to_string(),
             body: body.to_string(),
             created_at,
+            attachment: None,
         }
+    }
+
+    /// The same message, offering a file from the sender's shared folder.
+    pub fn with_attachment(mut self, path: &str) -> Self {
+        let cleaned = path.trim().trim_start_matches('/').to_string();
+        self.attachment = (!cleaned.is_empty()).then_some(cleaned);
+        self
     }
 
     /// Deterministic bytes covered by the signature.
@@ -57,13 +76,14 @@ impl Mail {
     /// of removing the user's text.
     pub fn signing_bytes(&self) -> Vec<u8> {
         format!(
-            "{SIGNING_DOMAIN}|{}|{}|{}|{}|{}|{}",
+            "{SIGNING_DOMAIN}|{}|{}|{}|{}|{}|{}|{}",
             self.version,
             self.from.to_hex(),
             self.to.to_hex(),
             self.created_at,
             B64.encode(self.subject.as_bytes()),
             B64.encode(self.body.as_bytes()),
+            B64.encode(self.attachment.as_deref().unwrap_or_default().as_bytes()),
         )
         .into_bytes()
     }
@@ -84,6 +104,20 @@ impl Mail {
             "message is {} bytes; the limit is {MAX_BODY_BYTES}",
             self.body.len(),
         );
+        if let Some(attachment) = &self.attachment {
+            ensure!(
+                attachment.len() <= MAX_ATTACHMENT_PATH,
+                "attachment path is too long",
+            );
+            // The path is handed to a file service on the sender's side, so it
+            // must not be able to climb out of the shared folder.
+            ensure!(
+                !attachment
+                    .split('/')
+                    .any(|part| part == ".." || part.is_empty()),
+                "attachment path must stay inside the shared folder",
+            );
+        }
         Ok(())
     }
 
@@ -218,6 +252,60 @@ mod tests {
 
         sealed.accept(bob.peer_id()).unwrap();
         assert_eq!(sealed.mail.body, hostile, "the text survives intact");
+    }
+
+    #[test]
+    fn an_attachment_is_a_reference_not_a_copy() {
+        let (alice, bob) = pair();
+        let mail = Mail::new(alice.peer_id(), bob.peer_id(), "maps", "see attached", 100)
+            .with_attachment("maps/ridge.tif");
+
+        let sealed = SignedMail::seal(mail, &alice).unwrap();
+        sealed.accept(bob.peer_id()).unwrap();
+
+        assert_eq!(sealed.mail.attachment.as_deref(), Some("maps/ridge.tif"));
+        // The message carries the name, never the bytes.
+        assert!(serde_json::to_string(&sealed).unwrap().len() < 1000);
+    }
+
+    #[test]
+    fn swapping_the_attachment_breaks_the_signature() {
+        // Otherwise a message could be made to point at a different file.
+        let (alice, bob) = pair();
+        let mut sealed = SignedMail::seal(
+            Mail::new(alice.peer_id(), bob.peer_id(), "maps", "b", 100)
+                .with_attachment("maps/ridge.tif"),
+            &alice,
+        )
+        .unwrap();
+
+        sealed.mail.attachment = Some("private/keys.txt".into());
+        assert!(sealed.accept(bob.peer_id()).is_err());
+    }
+
+    #[test]
+    fn an_attachment_cannot_climb_out_of_the_shared_folder() {
+        let (alice, bob) = pair();
+        for path in ["../identity.key", "maps/../../identity.key", "a//b"] {
+            let mail =
+                Mail::new(alice.peer_id(), bob.peer_id(), "s", "b", 100).with_attachment(path);
+            assert!(
+                SignedMail::seal(mail, &alice).is_err(),
+                "{path} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_message_with_no_attachment_still_verifies() {
+        let (alice, bob) = pair();
+        let sealed = SignedMail::seal(
+            Mail::new(alice.peer_id(), bob.peer_id(), "s", "b", 100),
+            &alice,
+        )
+        .unwrap();
+        sealed.accept(bob.peer_id()).unwrap();
+        assert!(sealed.mail.attachment.is_none());
     }
 
     #[test]

@@ -84,8 +84,12 @@ pub fn queue(
     to: PeerId,
     subject: &str,
     body: &str,
+    attachment: Option<&str>,
 ) -> Result<i64> {
-    let mail = Mail::new(from, to, subject, body, now_secs());
+    let mut mail = Mail::new(from, to, subject, body, now_secs());
+    if let Some(path) = attachment {
+        mail = mail.with_attachment(path);
+    }
     let store = store
         .lock()
         .map_err(|_| anyhow::anyhow!("the mail store is busy"))?;
