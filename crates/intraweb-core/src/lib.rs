@@ -11,6 +11,7 @@ pub mod hex;
 pub mod identity;
 pub mod mail;
 pub mod peer;
+pub mod sealed;
 pub mod vault;
 
 pub use config::Config;
@@ -18,6 +19,7 @@ pub use db::Store;
 pub use identity::{Identity, PeerId};
 pub use mail::{Mail, SignedMail};
 pub use peer::{DiscoverySource, Peer, TrustState, now_secs};
+pub use sealed::{EncryptionKey, SealingKey};
 pub use vault::{Runtime, Vault};
 
 /// Wire-protocol version. Bumped when the discovery payload changes shape, so

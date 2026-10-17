@@ -17,6 +17,9 @@ ed25519-dalek = "3"
 getrandom = "0.3"
 sha2 = "0.11"
 base64 = "0.22"
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+chacha20poly1305 = "0.11"
+hkdf = "0.13"
 rusqlite = { version = "0.40", features = ["bundled"] }
 directories = "6"
 toml = "0.9"

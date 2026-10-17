@@ -123,6 +123,14 @@ impl Identity {
         })
     }
 
+    /// The raw seed, for deriving other key material from this vault.
+    ///
+    /// Only `sealed` should need this, and only through HKDF with a domain
+    /// label -- never to sign or encrypt with directly.
+    pub(crate) fn seed(&self) -> &[u8; SEED_LEN] {
+        self.signing.as_bytes()
+    }
+
     pub fn peer_id(&self) -> PeerId {
         PeerId(self.signing.verifying_key().to_bytes())
     }
