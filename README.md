@@ -107,8 +107,10 @@ network.
   files/         PUBLIC   media and downloads neighbors can pull
 ```
 
-Drop an `index.html` in `site/` and it is live at every hub you join. Point
-`$INTRAWEB_VAULT` somewhere else to run more than one node on one machine.
+Drop an `index.html` in `site/` and it is live at every hub you join, or write
+it from the dashboard's **Your page** panel, which also takes the pictures that
+go beside it. Point `$INTRAWEB_VAULT` somewhere else to run more than one node
+on one machine.
 
 
 ## In the terminal
@@ -301,11 +303,11 @@ so many networks quietly break one of them.
 ## Status
 
 Working today: discovery, portable identity, the roster, the web and terminal
-dashboards, diagnostics, `serve`, `surf`, signed store-and-forward mail, and
-resumable file transfer.
+dashboards, diagnostics, `serve`, `surf`, signed store-and-forward mail with
+attachments, channels both public and private, guestbooks, and resumable file
+transfer. Your page is written from the dashboard.
 
-Still to come: publishing a site from the dashboard, and attaching files to
-mail. See `NOTES.md` for the plan and what is still undecided.
+See `NOTES.md` for what is still undecided.
 
 ## License
 

@@ -156,6 +156,58 @@ from the first release opens without the operator doing anything.
   notification if the folder is deleted underneath it).
 <!-- MEMORY_UPDATE_END -->
 
+<!-- MEMORY_UPDATE_START -->
+### Update: 2026-10-19 (mDNS presence, site editor)
+
+* **Decisions/Changes**:
+  * **mDNS presence is edge-triggered; the beacon's is a heartbeat.** The
+    responder resolves a service *once* and then renews the record without
+    notifying us again — it keeps a `resolved` set specifically to suppress
+    repeats — so there was never a stream of mDNS sightings to time out
+    against. The roster was applying the beacon's 30s timeout to a path with
+    no heartbeat, which dropped every mDNS-only peer at every timeout. Beacons
+    arriving every 2s had been masking it completely; it only shows up under
+    `--no-beacon`, i.e. exactly the multicast-only networks mDNS exists for.
+    `hold_mdns` / `release_mdns` now hold a peer present until mDNS withdraws
+    them, and the sweep skips a held peer. (CLAUDE.md rules 23–25.)
+  * **A withdrawal names a service, not a key.** `absorb()` returns whether it
+    took the record, and a service name is filed against a key only once that
+    signature has been checked — otherwise anyone could evict anyone by
+    announcing someone else's id and then withdrawing it.
+  * **Replay rejection is back to strictly-newer.** Equal timestamps had to be
+    accepted while liveness depended on repeated sightings; on the mDNS path a
+    record now grants a hold that no timeout expires, so accepting a replay
+    would pin a departed peer to every roster on the link indefinitely. The
+    hold carries liveness, so nothing needs the repeats.
+  * **A periodic refresh must not unregister first.** Withdrawing before
+    re-registering is right for a rename (the instance name embeds the
+    nickname) but wrong for a refresh: it withdrew us from every roster until
+    we were resolved again. The responder treats a repeat `register` as an
+    update — its own docs say so.
+  * **SIGTERM is an exit.** `unregister` and `shutdown` only queue a command for
+    the responder's thread, so dropping the acknowledgements and exiting meant
+    the goodbye never left. Both signals are handled and shutdown now waits for
+    the packet. Graceful departure: ~31s → under 3s.
+  * **Your page is written from the dashboard.** Four endpoints, no new
+    dependency — a file posts as a raw body with its name in the path, so there
+    is no multipart parser. One shared write path, so the size cap and symlink
+    refusal cannot apply on one route and be forgotten on the next.
+  * Verified against two real nodes and a real browser, not asserted: present
+    at 7/42/77/117/137s under `--no-beacon` where it was empty at 40s before;
+    traversal, symlink write-through and cross-origin POST all refused with the
+    vault's `identity.key` as the target.
+
+* **Known Bugs/Gaps**:
+  * An ungracefully-killed mDNS-only peer lingers until its record expires
+    (~2 min) rather than 30s. That is ordinary mDNS, and the beacon covers it
+    on a normal network, but the roster is briefly wrong on a multicast-only
+    one.
+  * Nothing bounds a published folder filled by hand; only the dashboard's own
+    writes are capped.
+  * `v0.1.0` is still untagged, so `install.sh` points at artifacts that do not
+    exist yet. Outward-facing — waiting on an explicit yes.
+<!-- MEMORY_UPDATE_END -->
+
 ## Open questions for Ben
 
 Answered in session (recorded so they are not re-litigated):
@@ -176,9 +228,20 @@ Decided while building, no longer open:
    is refused rather than guessed.
 10. **Transport** — one HTTP port for everything. No second protocol.
 
+Closed since:
+
+11. **Attachments.** Built as a reference, never a copy: the bytes stay with the
+    sender until fetched. The path is covered by the signature and checked for
+    `..` before signing, so a message cannot be repointed at another file.
+12. **Inbound limits.** Built, with a *global* bucket beside the per-sender one —
+    identities are free to mint, so a per-sender limit alone is theatre.
+
 Genuinely still open:
 
-11. **Attachments.** Mail carries text. An attachment is a file reference plus a
-    pull, not a body — but whose disk holds it until it is fetched?
-12. **Inbound mail limits.** Nothing rate-limits a hostile peer beyond the body
-    cap. A per-sender quota probably belongs before any wider deployment.
+13. **Departure latency over multicast only.** A node that is unplugged rather
+    than stopped lingers until its mDNS record expires, which is a couple of
+    minutes. That is ordinary mDNS behavior and the beacon covers for it on a
+    normal network, but on a multicast-only one the roster is briefly wrong.
+14. **Nothing bounds a published folder.** The dashboard caps what it will
+    write, but a vault whose `site/` is filled by hand can still fill the card
+    a node boots from.
