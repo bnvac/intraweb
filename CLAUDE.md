@@ -138,6 +138,25 @@ key material independent.
 22. **Tests never assume an empty network.** The machine running them may have
     real nodes on it. Assert invariants (a warning always carries a remedy; the
     verdict follows from the counts), not specific peer counts.
+23. **mDNS presence is edge-triggered; the beacon's is a heartbeat.** A service
+    resolves *once* and the responder then renews the record behind your back
+    without notifying you again, so there is no stream of mDNS sightings to
+    time out against. `hold_mdns` holds the peer present until the record is
+    withdrawn, and `release_mdns` is the only thing that ends it. Applying the
+    beacon's timeout to an mDNS peer dropped them after thirty seconds, which
+    is exactly the multicast-only network mDNS is there to serve. (Real bug,
+    named regression test.)
+24. **A withdrawal names a service, not a key.** mDNS has no idea whose key was
+    behind a record it drops, so a service name may only evict somebody filed
+    under it *after* their signature was checked. `absorb` returns whether it
+    took the record, and nothing is held on a record it refused -- otherwise
+    anyone could evict anyone by announcing someone else's id and withdrawing
+    it.
+25. **Say goodbye before exiting, and wait for it to leave.** `unregister` and
+    `shutdown` only queue a command for the responder's own thread; dropping
+    the acknowledgements and exiting meant the goodbye never went out and
+    neighbors kept the node until its record expired. SIGTERM counts as an
+    exit: a node run by a service manager is stopped with it, not Ctrl-C.
 
 ## Conventions
 

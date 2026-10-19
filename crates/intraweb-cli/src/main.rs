@@ -421,12 +421,43 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
         let server = axum::serve(listener, api::router(state));
         tokio::select! {
             result = server => result.context("the dashboard stopped unexpectedly")?,
-            _ = tokio::signal::ctrl_c() => println!("\nLeaving the neighborhood."),
+            _ = stop_requested() => println!("\nLeaving the neighborhood."),
         }
     }
 
     node.shutdown();
     Ok(())
+}
+
+/// Wait for whatever the operator -- or their service manager -- uses to stop us.
+///
+/// Ctrl-C alone is not enough. A node run under systemd or in a container is
+/// stopped with SIGTERM, and leaving on that unhandled means skipping the mDNS
+/// goodbye, which leaves us on every neighbor's roster until our record expires
+/// a couple of minutes later.
+async fn stop_requested() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        // If the handler cannot be installed there is nothing useful to do but
+        // fall back to Ctrl-C, so a failure here is not worth reporting.
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(term) => term,
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// Look around the neighborhood and report what is being published.

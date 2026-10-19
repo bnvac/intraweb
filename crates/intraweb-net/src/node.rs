@@ -6,7 +6,7 @@
 //! primary, and no hub is ever asked for permission.
 
 use crate::beacon::{ANNOUNCE_INTERVAL_SECS, Beacon};
-use crate::mdns::MdnsNode;
+use crate::mdns::{MdnsEvent, MdnsNode};
 use crate::presence::Presence;
 use crate::registry::{PeerRegistry, Sighting};
 use anyhow::{Context, Result};
@@ -147,16 +147,37 @@ impl Node {
             let registry = Arc::clone(&registry);
             let store = Arc::clone(&store);
             tokio::spawn(async move {
-                while let Some(sighting) = sightings.recv().await {
-                    absorb(
-                        &registry,
-                        &store,
-                        self_id,
-                        &sighting.presence,
-                        &sighting.signature,
-                        sighting.addrs,
-                        DiscoverySource::Mdns,
-                    );
+                while let Some(event) = sightings.recv().await {
+                    match event {
+                        MdnsEvent::Seen(sighting) => {
+                            let peer_id = sighting.presence.peer_id;
+                            let taken = absorb(
+                                &registry,
+                                &store,
+                                self_id,
+                                &sighting.presence,
+                                &sighting.signature,
+                                sighting.addrs,
+                                DiscoverySource::Mdns,
+                            );
+                            // Only now is the name safe to believe: it is tied
+                            // to a key whose signature we just checked.
+                            if taken && let Ok(mut reg) = registry.write() {
+                                reg.hold_mdns(&sighting.fullname, peer_id);
+                            }
+                        }
+                        MdnsEvent::Gone { fullname } => {
+                            let Ok(mut reg) = registry.write() else {
+                                continue;
+                            };
+                            if let Some(departed) = reg.release_mdns(&fullname) {
+                                tracing::info!(
+                                    nickname = %departed.nickname,
+                                    "peer said goodbye",
+                                );
+                            }
+                        }
+                    }
                 }
             });
         }
@@ -248,6 +269,40 @@ impl Node {
             });
         }
 
+        // Publish the mDNS record again before it ages out of the clock-skew
+        // window. Without this a long-running node became invisible to anyone
+        // who had not already found it.
+        if announce {
+            let mdns = Arc::clone(&mdns);
+            let identity = Arc::clone(&identity);
+            let announced = Arc::clone(&announced);
+            let config = config.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(
+                    crate::mdns::REANNOUNCE_INTERVAL_SECS,
+                ));
+                ticker.tick().await; // the first tick is immediate
+                loop {
+                    ticker.tick().await;
+                    let nickname = announced
+                        .read()
+                        .map(|held| held.clone())
+                        .unwrap_or_else(|_| config.sanitized_nickname());
+                    let presence = Presence::new(
+                        &identity,
+                        &nickname,
+                        config.api_port,
+                        config.hub,
+                        &config.hub_name,
+                    );
+                    let signature = presence.sign(&identity);
+                    if let Err(err) = mdns.reannounce(&presence, &signature, config.hub) {
+                        tracing::warn!(%err, "could not refresh the mDNS record");
+                    }
+                }
+            });
+        }
+
         // Expire peers that stopped announcing.
         {
             let registry = Arc::clone(&registry);
@@ -310,6 +365,11 @@ impl Node {
 ///
 /// Anything that fails verification is dropped silently at debug level: on an
 /// open network, unverifiable packets are background noise, not incidents.
+/// Take a presence record from the network, if it survives every check.
+///
+/// Returns whether it was recorded, so a caller holding evidence of its own --
+/// an mDNS service name -- files that against the key only once the signature
+/// behind it has been checked.
 fn absorb(
     registry: &Arc<RwLock<PeerRegistry>>,
     store: &Arc<Mutex<Store>>,
@@ -318,12 +378,12 @@ fn absorb(
     signature: &[u8],
     addrs: Vec<std::net::IpAddr>,
     source: DiscoverySource,
-) {
+) -> bool {
     // Our own broadcast comes straight back to us and verifies perfectly --
     // it is genuinely our signature. Drop it here rather than after the
     // registry's self-check, or we file ourselves in our own keyring.
     if presence.peer_id == self_id {
-        return;
+        return false;
     }
 
     // A blocked key is dropped before anything else happens: no verification,
@@ -333,13 +393,31 @@ fn absorb(
         .map(|reg| reg.is_blocked(presence.peer_id))
         .unwrap_or(false)
     {
-        return;
+        return false;
     }
 
     let now = now_secs();
     if let Err(err) = presence.verify(signature, now) {
         tracing::debug!(%err, "discarding an unverifiable presence record");
-        return;
+        return false;
+    }
+
+    // The signature is genuine, which is exactly why this check is needed:
+    // anyone who captured a real announcement can play it back while it is
+    // still inside the clock-skew window. Each one must be newer than the
+    // last we took from that peer.
+    {
+        let Ok(mut reg) = registry.write() else {
+            return false;
+        };
+        if !reg.is_fresh(presence.peer_id, presence.timestamp) {
+            tracing::debug!(
+                fingerprint = %presence.peer_id.fingerprint(),
+                "discarding a replayed presence record",
+            );
+            return false;
+        }
+        reg.note_presence(presence.peer_id, presence.timestamp);
     }
 
     // Most sightings are a peer we already know, saying the same thing it said
@@ -354,7 +432,9 @@ fn absorb(
         None => {
             // Scoped so the database lock is never held across the roster lock.
             let persisted = {
-                let Ok(store) = store.lock() else { return };
+                let Ok(store) = store.lock() else {
+                    return false;
+                };
                 store.observe_peer(presence.peer_id, &presence.nickname, now)
             };
             match persisted {
@@ -366,14 +446,14 @@ fn absorb(
                 }
                 Err(err) => {
                     tracing::warn!(%err, "could not record a peer sighting");
-                    return;
+                    return false;
                 }
             }
         }
     };
 
     let Ok(mut reg) = registry.write() else {
-        return;
+        return false;
     };
     if reg.record(presence, addrs, source, trust, now) == Sighting::Arrived {
         tracing::info!(
@@ -383,6 +463,7 @@ fn absorb(
             "peer appeared",
         );
     }
+    true
 }
 
 #[cfg(test)]
@@ -453,7 +534,7 @@ mod tests {
         let theirs = Presence::new(&mallory, "bob", 8420, false, "");
         let wrong_signature = [0u8; 64];
 
-        absorb(
+        let taken = absorb(
             &registry,
             &store,
             me.peer_id(),
@@ -463,6 +544,11 @@ mod tests {
             DiscoverySource::Mdns,
         );
 
+        // Regression guard: the mDNS loop files a service name against a key
+        // only when this comes back true. A withdrawal names a service and not
+        // a key, so believing an unverified record would let anyone evict
+        // anyone -- announce somebody else's id, then withdraw it.
+        assert!(!taken, "junk must not earn an mDNS hold");
         assert_eq!(
             store.lock().unwrap().known_peer_count().unwrap(),
             0,

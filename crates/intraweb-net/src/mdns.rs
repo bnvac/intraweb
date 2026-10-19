@@ -11,7 +11,39 @@ use anyhow::{Context, Result};
 use intraweb_core::SERVICE_TYPE;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::net::IpAddr;
+use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// How often the mDNS record is published again.
+///
+/// A presence record carries a timestamp and is only accepted inside the
+/// clock-skew window. Registering once at startup meant that after the window
+/// elapsed, every peer resolving the record rejected it as stale -- mDNS
+/// discovery quietly stopped working on exactly the long-running nodes this
+/// is built for. Comfortably inside the window, so a missed refresh is
+/// survivable.
+pub const REANNOUNCE_INTERVAL_SECS: u64 = 120;
+
+// Registering once at startup let the record age out of the clock-skew window,
+// after which every peer that resolved it rejected it as stale. Two refresh
+// intervals must still fit inside that window, so one missed round does not
+// make the node invisible to newcomers. Checked at compile time: changing
+// either constant past the other should not build.
+const _: () = assert!(REANNOUNCE_INTERVAL_SECS * 2 < crate::presence::MAX_CLOCK_SKEW_SECS);
+
+/// How long to give the responder to put our goodbye on the wire before the
+/// process exits.
+///
+/// `unregister` and `shutdown` only queue a command -- the responder sends the
+/// packet from its own thread -- so dropping the acknowledgements and exiting
+/// immediately meant the goodbye never left at all, and neighbors kept us on
+/// their roster until our record expired minutes later. The first packet is
+/// sent before the acknowledgement arrives, and mDNS repeats it shortly after
+/// in case anyone missed it.
+const GOODBYE_GRACE: Duration = Duration::from_millis(500);
+
+/// How long mDNS waits before repeating a goodbye.
+const GOODBYE_REPEAT: Duration = Duration::from_millis(250);
 
 /// Hostname a hub claims so newcomers have a memorable place to start.
 pub const HUB_HOSTNAME: &str = "intranet";
@@ -22,6 +54,23 @@ pub struct MdnsSighting {
     pub presence: Presence,
     pub signature: Vec<u8>,
     pub addrs: Vec<IpAddr>,
+    /// The service name this resolved under, so a later withdrawal of the same
+    /// name can be tied back to the key we verify here.
+    pub fullname: String,
+}
+
+/// What browsing reports.
+///
+/// mDNS does not repeat itself: a service resolves once and the record then
+/// stands until it is withdrawn or expires, so presence has to be tracked by
+/// these two edges rather than by counting sightings.
+#[derive(Debug)]
+pub enum MdnsEvent {
+    /// A service resolved. Its presence record is still unverified.
+    Seen(MdnsSighting),
+    /// A service was withdrawn, by goodbye packet or by expiring. Carries only
+    /// the service name; mDNS has no idea whose key was behind it.
+    Gone { fullname: String },
 }
 
 pub struct MdnsNode {
@@ -91,14 +140,19 @@ impl MdnsNode {
     /// The old registration is withdrawn first, or neighbors keep both: mDNS
     /// has no notion of replacing a record, only adding and removing one.
     pub fn reannounce(&self, presence: &Presence, signature: &[u8], is_hub: bool) -> Result<()> {
-        if let Ok(mut held) = self.fullname.lock()
-            && let Some(previous) = held.take()
-        {
+        let service = Self::service_for(presence, signature, is_hub)?;
+        let fullname = service.get_fullname().to_string();
+
+        // Withdraw the old registration only when the name really changed. A
+        // refresh under the same name must not send a goodbye first: that
+        // withdraws us from every roster on the link until we are resolved
+        // again, and the responder treats a repeat `register` as an update.
+        let previous = self.fullname.lock().ok().and_then(|held| held.clone());
+        let renamed = previous.as_deref().is_some_and(|prev| prev != fullname);
+        if renamed && let Some(previous) = previous {
             let _ = self.daemon.unregister(&previous);
         }
 
-        let service = Self::service_for(presence, signature, is_hub)?;
-        let fullname = service.get_fullname().to_string();
         self.daemon
             .register(service)
             .context("could not re-register over mDNS")?;
@@ -106,7 +160,11 @@ impl MdnsNode {
         if let Ok(mut held) = self.fullname.lock() {
             *held = Some(fullname.clone());
         }
-        tracing::info!(%fullname, "announcing under a new name");
+        if renamed {
+            tracing::info!(%fullname, "announcing under a new name");
+        } else {
+            tracing::debug!(%fullname, "refreshed our mDNS record");
+        }
         Ok(())
     }
 
@@ -127,7 +185,7 @@ impl MdnsNode {
     ///
     /// The responder is synchronous, so a dedicated thread bridges its channel
     /// into async-land rather than blocking a runtime worker indefinitely.
-    pub fn browse(&self) -> Result<mpsc::Receiver<MdnsSighting>> {
+    pub fn browse(&self) -> Result<mpsc::Receiver<MdnsEvent>> {
         let events = self
             .daemon
             .browse(SERVICE_TYPE)
@@ -138,28 +196,33 @@ impl MdnsNode {
             .name("intraweb-mdns-browse".into())
             .spawn(move || {
                 while let Ok(event) = events.recv() {
-                    let ServiceEvent::ServiceResolved(service) = event else {
-                        continue;
+                    let outgoing = match event {
+                        ServiceEvent::ServiceResolved(service) => {
+                            let txt = service.txt_properties.clone().into_property_map_str();
+                            let Ok((presence, signature)) = Presence::from_txt(&txt) else {
+                                tracing::debug!(
+                                    name = %service.fullname,
+                                    "ignoring unreadable presence",
+                                );
+                                continue;
+                            };
+                            let addrs = service
+                                .addresses
+                                .iter()
+                                .map(|scoped| scoped.to_ip_addr())
+                                .collect();
+                            MdnsEvent::Seen(MdnsSighting {
+                                presence,
+                                signature,
+                                addrs,
+                                fullname: service.fullname.clone(),
+                            })
+                        }
+                        ServiceEvent::ServiceRemoved(_, fullname) => MdnsEvent::Gone { fullname },
+                        _ => continue,
                     };
-                    let txt = service.txt_properties.clone().into_property_map_str();
-                    let Ok((presence, signature)) = Presence::from_txt(&txt) else {
-                        tracing::debug!(name = %service.fullname, "ignoring unreadable presence");
-                        continue;
-                    };
-                    let addrs = service
-                        .addresses
-                        .iter()
-                        .map(|scoped| scoped.to_ip_addr())
-                        .collect();
 
-                    if tx
-                        .blocking_send(MdnsSighting {
-                            presence,
-                            signature,
-                            addrs,
-                        })
-                        .is_err()
-                    {
+                    if tx.blocking_send(outgoing).is_err() {
                         break; // The daemon shut down; stop bridging.
                     }
                 }
@@ -171,12 +234,21 @@ impl MdnsNode {
 
     /// Withdraw our announcement so peers drop us promptly instead of timing out.
     pub fn shutdown(&self) {
-        if let Ok(held) = self.fullname.lock()
-            && let Some(fullname) = held.as_ref()
+        // Taken by value so the lock is not held while we wait.
+        let fullname = self.fullname.lock().ok().and_then(|held| held.clone());
+        if let Some(fullname) = fullname
+            && let Ok(acknowledged) = self.daemon.unregister(&fullname)
         {
-            let _ = self.daemon.unregister(fullname);
+            // The acknowledgement comes after the packet is sent, so this is
+            // what actually gets the goodbye out.
+            let _ = acknowledged.recv_timeout(GOODBYE_GRACE);
+            // And this lets the repeat follow it. Only an announcing node pays
+            // the wait, once, on its way out.
+            std::thread::sleep(GOODBYE_REPEAT);
         }
-        let _ = self.daemon.shutdown();
+        if let Ok(stopped) = self.daemon.shutdown() {
+            let _ = stopped.recv_timeout(GOODBYE_GRACE);
+        }
     }
 }
 
