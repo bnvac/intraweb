@@ -118,6 +118,28 @@
       </div>
     </section>
 
+    <section class="module" aria-labelledby="site-heading">
+      <h2 class="module-head" id="site-heading">
+        Your page <span class="module-meta" id="site-meta"></span>
+      </h2>
+      <div class="module-body">
+        <p class="aside-note">Plain HTML, served off your own vault at
+           <a id="site-link" href="#">your address</a>. Nobody hosts it but you.</p>
+        <textarea id="site-html" class="editor" rows="12" spellcheck="false"
+                  aria-label="the HTML of your page"></textarea>
+        <div class="field-row end">
+          <span id="site-result" class="aside-note"></span>
+          <button type="button" id="revert-site" class="quiet">Revert</button>
+          <button type="button" id="save-site">Save page</button>
+        </div>
+        <div id="site-files" class="stack"></div>
+        <label class="file-pick">
+          <span>Add a picture or file</span>
+          <input type="file" id="site-upload" multiple>
+        </label>
+      </div>
+    </section>
+
     <section class="module" aria-labelledby="guestbook-heading">
       <h2 class="module-head" id="guestbook-heading">
         Guestbook <span class="module-meta" id="guestbook-meta"></span>

@@ -146,6 +146,10 @@ function renderMe(status) {
   site.textContent = `/~${status.nickname}`;
   site.href = `/~${status.nickname}/`;
 
+  const editorLink = document.getElementById("site-link");
+  editorLink.textContent = `/~${status.nickname}`;
+  editorLink.href = `/~${status.nickname}/`;
+
   document.querySelector(".presence").classList.add("live");
   text("presence-text", `online · ${status.peers_online} in range`);
 }
@@ -500,5 +504,158 @@ document.getElementById("compose").addEventListener("submit", async (event) => {
   }
 });
 
+/* Your own page.
+ *
+ * Loaded once rather than on the poll: refreshing a textarea under somebody's
+ * cursor throws away whatever they were half way through typing. `siteDirty`
+ * is what tells the two apart.
+ */
+
+/* Matches MAX_SITE_WRITE on the node, so an oversized file is refused here
+   with the same advice instead of being pushed up the wire first. */
+const MAX_SITE_BYTES = 4 * 1024 * 1024;
+let siteDirty = false;
+
+function fileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderSiteFiles(files) {
+  const box = document.getElementById("site-files");
+  if (!files.length) {
+    box.innerHTML = "";
+    return;
+  }
+  box.innerHTML = files
+    .map(
+      (file) => `<div class="site-file">
+      <span class="name mono">${escapeHtml(file.name)}</span>
+      <span class="size">${escapeHtml(fileSize(file.size))}</span>
+      <button type="button" class="quiet" data-site-copy="${escapeHtml(file.name)}">Insert</button>
+      <button type="button" class="quiet danger" data-site-delete="${escapeHtml(file.name)}">Remove</button>
+    </div>`,
+    )
+    .join("");
+}
+
+async function loadSite({ keepEdits = false } = {}) {
+  try {
+    const site = await getJson("/api/site");
+    const editor = document.getElementById("site-html");
+    if (!keepEdits || !siteDirty) {
+      editor.value = site.html;
+      siteDirty = false;
+    }
+    renderSiteFiles(site.files);
+    // The folder is already named in the Vault panel; repeating a long
+    // absolute path in a title bar only pushes the heading off a small screen.
+    const meta = document.getElementById("site-meta");
+    meta.textContent = site.files.length
+      ? `${site.files.length} file${site.files.length === 1 ? "" : "s"}`
+      : "";
+    meta.title = site.path;
+  } catch (err) {
+    document.getElementById("site-result").textContent = "could not read your page";
+  }
+}
+
+document.getElementById("site-html").addEventListener("input", () => {
+  siteDirty = true;
+  document.getElementById("site-result").textContent = "unsaved";
+});
+
+document.getElementById("save-site").addEventListener("click", async (event) => {
+  const result = document.getElementById("site-result");
+  const body = document.getElementById("site-html").value;
+  if (body.length > MAX_SITE_BYTES) {
+    result.textContent = "that page is too big to save";
+    return;
+  }
+
+  event.target.disabled = true;
+  result.textContent = "Saving\u2026";
+  try {
+    const response = await fetch("/api/site", {
+      method: "POST",
+      headers: { "Content-Type": "text/html" },
+      body,
+    });
+    result.textContent = await response.text();
+    if (response.ok) siteDirty = false;
+  } catch (err) {
+    result.textContent = "the node did not answer";
+  } finally {
+    event.target.disabled = false;
+  }
+});
+
+document.getElementById("revert-site").addEventListener("click", async () => {
+  siteDirty = false;
+  await loadSite();
+  document.getElementById("site-result").textContent = "Reverted to what is published.";
+});
+
+document.getElementById("site-upload").addEventListener("change", async (event) => {
+  const result = document.getElementById("site-result");
+  const chosen = Array.from(event.target.files || []);
+  if (!chosen.length) return;
+
+  for (const file of chosen) {
+    if (file.size > MAX_SITE_BYTES) {
+      result.textContent = `${file.name} is too big; put large files in the vault's files/ folder`;
+      continue;
+    }
+    result.textContent = `Uploading ${file.name}\u2026`;
+    try {
+      const response = await fetch(`/api/site/file/${encodeURIComponent(file.name)}`, {
+        method: "POST",
+        body: file,
+      });
+      result.textContent = await response.text();
+    } catch (err) {
+      result.textContent = `could not upload ${file.name}`;
+    }
+  }
+  // Clear it, or choosing the same file twice in a row fires no event.
+  event.target.value = "";
+  // Keep whatever is being typed; only the file list needs to catch up.
+  await loadSite({ keepEdits: true });
+});
+
+document.getElementById("site-files").addEventListener("click", async (event) => {
+  const copy = event.target.dataset.siteCopy;
+  if (copy) {
+    const tag = /\.(png|jpe?g|gif|webp|svg)$/i.test(copy)
+      ? `<img src="${copy}" alt="">`
+      : `<a href="${copy}">${copy}</a>`;
+    const editor = document.getElementById("site-html");
+    // Dropped in at the cursor, which is where somebody writing a page wants
+    // it -- and writing it in is more use than a clipboard they must paste.
+    const at = editor.selectionStart ?? editor.value.length;
+    editor.value = `${editor.value.slice(0, at)}${tag}${editor.value.slice(at)}`;
+    editor.focus();
+    editor.selectionStart = editor.selectionEnd = at + tag.length;
+    siteDirty = true;
+    document.getElementById("site-result").textContent = "unsaved";
+    return;
+  }
+
+  const name = event.target.dataset.siteDelete;
+  if (!name) return;
+  const result = document.getElementById("site-result");
+  try {
+    const response = await fetch(`/api/site/file/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    });
+    result.textContent = await response.text();
+  } catch (err) {
+    result.textContent = `could not remove ${name}`;
+  }
+  await loadSite({ keepEdits: true });
+});
+
 refresh();
+loadSite();
 setInterval(refresh, REFRESH_MS);

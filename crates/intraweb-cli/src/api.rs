@@ -372,6 +372,204 @@ async fn mark_all_read(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// The page this node publishes, and whatever sits beside it.
+#[derive(Serialize)]
+struct SiteView {
+    /// The folder being published, so the editor can say where it writes.
+    /// `intraweb serve` points this outside the vault.
+    path: String,
+    /// `index.html` as it stands, empty when there is not one yet.
+    html: String,
+    files: Vec<SiteFile>,
+}
+
+#[derive(Serialize)]
+struct SiteFile {
+    name: String,
+    size: u64,
+}
+
+/// The page a node serves at `/~nickname`.
+const SITE_INDEX: &str = "index.html";
+
+/// The largest thing the dashboard will write into the published folder.
+///
+/// The body is buffered whole to be written, and a node is expected to run on
+/// a Pi booting off an SD card, so this bounds both the memory it takes and
+/// the mess a slip of the mouse can make. Large media belongs in `files/`,
+/// which is served off disk without being read into memory at all.
+const MAX_SITE_WRITE: usize = 4 * 1024 * 1024;
+
+/// Accept a plain filename, and nothing that could name somewhere else.
+///
+/// The name arrives inside a URL, so it is percent-encoded and hostile until
+/// checked. Anything with a separator, a traversal or a leading dot is refused
+/// outright rather than rewritten into something safe: a name that needs
+/// repairing is not the name the person meant to type, and silently saving
+/// their file somewhere else is worse than saying no.
+fn safe_site_name(raw: &str) -> Option<String> {
+    let name = crate::guard::percent_decode(raw);
+    if name.is_empty() || name.len() > 96 || name.starts_with('.') {
+        return None;
+    }
+    if name.contains(['/', '\\', '\0']) {
+        return None;
+    }
+    // Belt and braces: the name must still describe one ordinary path segment.
+    let plain = std::path::Path::new(&name)
+        .components()
+        .all(|part| matches!(part, std::path::Component::Normal(_)));
+    plain.then_some(name)
+}
+
+/// Whether this path is a symlink, which is never ours to write through.
+///
+/// `ServeDir` following a link out of the published folder was a real hole,
+/// closed by `guarded_dir`. Writing is the same hole pointed the other way: a
+/// link planted in the folder would let a save land outside it, so a save onto
+/// one is refused rather than followed.
+fn is_symlink(path: &std::path::Path) -> bool {
+    path.symlink_metadata()
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+async fn get_site(State(state): State<AppState>) -> impl IntoResponse {
+    let dir = &state.site_dir;
+    let html = std::fs::read_to_string(dir.join(SITE_INDEX)).unwrap_or_default();
+
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == SITE_INDEX {
+                continue;
+            }
+            // Deliberately not following links: what one points at is not
+            // this node's to publish or to describe.
+            let Ok(meta) = entry.path().symlink_metadata() else {
+                continue;
+            };
+            if !meta.file_type().is_file() {
+                continue;
+            }
+            files.push(SiteFile {
+                name,
+                size: meta.len(),
+            });
+        }
+    }
+    files.sort_by(|a, b| a.name.cmp(&b.name));
+
+    axum::Json(SiteView {
+        path: dir.display().to_string(),
+        html,
+        files,
+    })
+}
+
+async fn put_site(State(state): State<AppState>, body: String) -> impl IntoResponse {
+    write_site_file(
+        &state,
+        SITE_INDEX,
+        body.as_bytes(),
+        "Saved. Your page is live.",
+    )
+}
+
+async fn put_site_file(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let Some(name) = safe_site_name(&name) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "that filename cannot be used; plain names only, no folders",
+        )
+            .into_response();
+    };
+    let message = format!("Uploaded {name}.");
+    write_site_file(&state, &name, &body, &message)
+}
+
+/// The one path from the dashboard to the published folder.
+///
+/// Shared so the size cap and the symlink refusal cannot be in force on one
+/// route and forgotten on the next.
+fn write_site_file(
+    state: &AppState,
+    name: &str,
+    body: &[u8],
+    message: &str,
+) -> axum::response::Response {
+    if body.len() > MAX_SITE_WRITE {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "that is larger than the {}MB this will write; put big files in the vault's \
+                 files/ folder, which is served straight off disk",
+                MAX_SITE_WRITE / (1024 * 1024)
+            ),
+        )
+            .into_response();
+    }
+
+    let dir = &state.site_dir;
+    if let Err(err) = std::fs::create_dir_all(dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not create {}: {err}", dir.display()),
+        )
+            .into_response();
+    }
+
+    let path = dir.join(name);
+    if is_symlink(&path) {
+        return (
+            StatusCode::FORBIDDEN,
+            format!("{name} is a link to somewhere else; refusing to write through it"),
+        )
+            .into_response();
+    }
+
+    match std::fs::write(&path, body) {
+        Ok(()) => (StatusCode::OK, message.to_string()).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not save {name}: {err}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_site_file(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let Some(name) = safe_site_name(&name) else {
+        return (StatusCode::BAD_REQUEST, "that filename cannot be used").into_response();
+    };
+
+    let path = state.site_dir.join(&name);
+    // Removing a link removes the link and not its target, so this one is safe
+    // either way -- but a directory is not this endpoint's to delete.
+    match path.symlink_metadata() {
+        Ok(meta) if meta.file_type().is_dir() => {
+            (StatusCode::BAD_REQUEST, "that is a folder").into_response()
+        }
+        Ok(_) => match std::fs::remove_file(&path) {
+            Ok(()) => (StatusCode::OK, format!("Removed {name}.")).into_response(),
+            Err(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not remove {name}: {err}"),
+            )
+                .into_response(),
+        },
+        Err(_) => (StatusCode::NOT_FOUND, "there is no such file").into_response(),
+    }
+}
+
 #[derive(Serialize)]
 struct SharedFile {
     path: String,
@@ -995,6 +1193,16 @@ pub fn router(state: AppState) -> Router {
         .route("/api/guestbook", get(read_guestbook))
         .route("/api/guestbook/{peer}", post(sign_guestbook))
         .route("/api/files", get(shared_files))
+        .route("/api/site", get(get_site).post(put_site))
+        .route(
+            "/api/site/file/{name}",
+            post(put_site_file).delete(delete_site_file),
+        )
+        // Axum's own cap is the backstop and says only that a limit was hit.
+        // Leaving room above our limit means an ordinary overshoot -- someone
+        // dragging in a photo straight off a camera -- reaches the handler and
+        // gets told where big files actually belong.
+        .layer(axum::extract::DefaultBodyLimit::max(4 * MAX_SITE_WRITE))
         .route("/api/channels", get(list_channels))
         .route("/api/channels/new", post(new_channel))
         .route("/api/channels/post", post(receive_post))
@@ -1053,7 +1261,7 @@ pub async fn bind(preferred_low_port: bool, port: u16) -> Result<(tokio::net::Tc
 
 #[cfg(test)]
 mod tests {
-    use super::should_try_low_port;
+    use super::{safe_site_name, should_try_low_port};
 
     #[test]
     fn a_plain_hub_takes_the_clean_url() {
@@ -1071,5 +1279,48 @@ mod tests {
     fn ordinary_peers_never_reach_for_port_80() {
         assert!(!should_try_low_port(false, false));
         assert!(!should_try_low_port(false, true));
+    }
+
+    #[test]
+    fn an_ordinary_filename_is_accepted() {
+        assert_eq!(safe_site_name("me.jpg").as_deref(), Some("me.jpg"));
+        assert_eq!(
+            safe_site_name("holiday%20snap.png").as_deref(),
+            Some("holiday snap.png"),
+            "a space arrives encoded and is not suspicious"
+        );
+    }
+
+    #[test]
+    fn a_name_that_points_out_of_the_published_folder_is_refused() {
+        for hostile in [
+            "../identity.key",
+            "..%2Fidentity.key",
+            "%2e%2e%2fidentity.key",
+            "sub/dir.png",
+            "/etc/passwd",
+            "..",
+            "",
+        ] {
+            assert_eq!(
+                safe_site_name(hostile),
+                None,
+                "{hostile} must not name a file to write"
+            );
+        }
+    }
+
+    /// A dotfile is how the interesting things in a vault are named, and a
+    /// published folder is not the place to be writing them from a browser.
+    #[test]
+    fn a_hidden_name_is_refused() {
+        assert_eq!(safe_site_name(".ssh"), None);
+        assert_eq!(safe_site_name(".%2e%2fidentity.key"), None);
+    }
+
+    #[test]
+    fn an_absurdly_long_name_is_refused() {
+        assert_eq!(safe_site_name(&"a".repeat(97)), None);
+        assert!(safe_site_name(&"a".repeat(96)).is_some());
     }
 }

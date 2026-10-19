@@ -315,3 +315,26 @@ button.quiet:hover { border-color: var(--accent); filter: none; }
 
 .attachment { margin-top: .4rem; font-size: .75rem; }
 .attachment .aside-note { display: inline; margin: 0; }
+
+/* The page editor. Monospace, because it is markup, and tall enough to see a
+   whole small page without scrolling it. */
+textarea.editor {
+  width: 100%; min-height: 12rem; resize: vertical;
+  font-family: ui-monospace, "Courier New", monospace;
+  font-size: .76rem; line-height: 1.5; white-space: pre;
+}
+
+.site-file {
+  display: flex; align-items: center; gap: .45rem;
+  font-size: .76rem; border: 1px solid var(--rule);
+  padding: .3rem .45rem; background: var(--paper);
+}
+.site-file .name { flex: 1; overflow-wrap: anywhere; }
+.site-file .size { color: var(--muted); font-size: .7rem; white-space: nowrap; }
+
+/* A file input styled as one of the era's beige buttons, without hiding it --
+   a hidden input is a keyboard trap waiting to happen. */
+.file-pick {
+  display: block; margin-top: .6rem; font-size: .76rem; color: var(--muted);
+}
+.file-pick input { display: block; margin-top: .3rem; width: 100%; font-size: .72rem; }
