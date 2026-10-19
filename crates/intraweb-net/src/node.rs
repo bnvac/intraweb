@@ -77,6 +77,13 @@ impl Roster {
 pub struct Node {
     pub roster: Roster,
     mdns: Arc<MdnsNode>,
+    /// The name we currently announce. Shared with the beacon loop so a
+    /// rename is picked up on its next tick rather than at the next restart.
+    announced: Arc<RwLock<String>>,
+    identity: Arc<Identity>,
+    api_port: u16,
+    hub: bool,
+    hub_name: String,
 }
 
 impl Node {
@@ -109,6 +116,7 @@ impl Node {
         announce: bool,
     ) -> Result<Self> {
         let nickname = config.sanitized_nickname();
+        let announced = Arc::new(RwLock::new(nickname.clone()));
         let presence = Presence::new(
             &identity,
             &nickname,
@@ -165,12 +173,18 @@ impl Node {
                 let beacon = Arc::clone(&beacon);
                 let identity = Arc::clone(&identity);
                 let config = config.clone();
-                let nickname = nickname.clone();
+                let announced = Arc::clone(&announced);
                 tokio::spawn(async move {
                     let mut ticker =
                         tokio::time::interval(Duration::from_secs(ANNOUNCE_INTERVAL_SECS));
                     loop {
                         ticker.tick().await;
+                        // Read the name each tick, so a rename takes effect
+                        // without the node being restarted.
+                        let nickname = announced
+                            .read()
+                            .map(|held| held.clone())
+                            .unwrap_or_else(|_| config.sanitized_nickname());
                         let presence = Presence::new(
                             &identity,
                             &nickname,
@@ -252,7 +266,39 @@ impl Node {
             });
         }
 
-        Ok(Self { roster, mdns })
+        Ok(Self {
+            roster,
+            mdns,
+            announced,
+            identity,
+            api_port: config.api_port,
+            hub: config.hub,
+            hub_name: config.hub_name.clone(),
+        })
+    }
+
+    /// Announce a new name to the network, without a restart.
+    ///
+    /// The beacon picks it up on its next tick because it reads the shared
+    /// name; mDNS has to be told, because a registration is replaced by
+    /// withdrawing it and making another.
+    pub fn rename(&self, nickname: &str) -> Result<()> {
+        let presence = Presence::new(
+            &self.identity,
+            nickname,
+            self.api_port,
+            self.hub,
+            &self.hub_name,
+        );
+        let signature = presence.sign(&self.identity);
+
+        // Store the scrubbed form, so the beacon announces exactly what mDNS
+        // just registered rather than something that differs by a character.
+        if let Ok(mut held) = self.announced.write() {
+            held.clone_from(&presence.nickname);
+        }
+
+        self.mdns.reannounce(&presence, &signature, self.hub)
     }
 
     pub fn shutdown(&self) {

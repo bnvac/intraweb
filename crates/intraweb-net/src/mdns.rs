@@ -26,15 +26,18 @@ pub struct MdnsSighting {
 
 pub struct MdnsNode {
     daemon: ServiceDaemon,
-    /// `None` for an observer, which browses without announcing itself.
-    fullname: Option<String>,
+    /// The name we are currently registered under. `None` for an observer,
+    /// which browses without announcing. Behind a lock because a rename
+    /// replaces it while the browse loop is running.
+    fullname: std::sync::Mutex<Option<String>>,
 }
 
 impl MdnsNode {
-    /// Register this node and start answering queries about it.
-    pub fn start(presence: &Presence, signature: &[u8], is_hub: bool) -> Result<Self> {
-        let daemon = ServiceDaemon::new().context("could not start the mDNS responder")?;
-
+    /// Build the service record we announce.
+    ///
+    /// Separate from registering it, because a rename has to build the same
+    /// shape again under a different name.
+    fn service_for(presence: &Presence, signature: &[u8], is_hub: bool) -> Result<ServiceInfo> {
         // A hub takes the well-known name; everyone else derives a unique one
         // from their fingerprint so two people called "ben" never collide.
         let host_name = if is_hub {
@@ -55,7 +58,7 @@ impl MdnsNode {
         let instance = format!("{}-{}", presence.nickname, &presence.peer_id.to_hex()[..8]);
 
         let addrs = local_addresses();
-        let service = ServiceInfo::new(
+        ServiceInfo::new(
             SERVICE_TYPE,
             &instance,
             &host_name,
@@ -63,18 +66,48 @@ impl MdnsNode {
             presence.api_port,
             presence.to_txt(signature),
         )
-        .context("could not build the mDNS service record")?;
+        .context("could not build the mDNS service record")
+    }
 
+    /// Register this node and start answering queries about it.
+    pub fn start(presence: &Presence, signature: &[u8], is_hub: bool) -> Result<Self> {
+        let daemon = ServiceDaemon::new().context("could not start the mDNS responder")?;
+
+        let service = Self::service_for(presence, signature, is_hub)?;
         let fullname = service.get_fullname().to_string();
         daemon
             .register(service)
             .context("could not register over mDNS")?;
-        tracing::info!(%fullname, %host_name, "announcing over mDNS");
+        tracing::info!(%fullname, "announcing over mDNS");
 
         Ok(Self {
             daemon,
-            fullname: Some(fullname),
+            fullname: std::sync::Mutex::new(Some(fullname)),
         })
+    }
+
+    /// Announce ourselves again under a changed name.
+    ///
+    /// The old registration is withdrawn first, or neighbors keep both: mDNS
+    /// has no notion of replacing a record, only adding and removing one.
+    pub fn reannounce(&self, presence: &Presence, signature: &[u8], is_hub: bool) -> Result<()> {
+        if let Ok(mut held) = self.fullname.lock()
+            && let Some(previous) = held.take()
+        {
+            let _ = self.daemon.unregister(&previous);
+        }
+
+        let service = Self::service_for(presence, signature, is_hub)?;
+        let fullname = service.get_fullname().to_string();
+        self.daemon
+            .register(service)
+            .context("could not re-register over mDNS")?;
+
+        if let Ok(mut held) = self.fullname.lock() {
+            *held = Some(fullname.clone());
+        }
+        tracing::info!(%fullname, "announcing under a new name");
+        Ok(())
     }
 
     /// Browse without announcing.
@@ -86,7 +119,7 @@ impl MdnsNode {
         let daemon = ServiceDaemon::new().context("could not start the mDNS responder")?;
         Ok(Self {
             daemon,
-            fullname: None,
+            fullname: std::sync::Mutex::new(None),
         })
     }
 
@@ -138,7 +171,9 @@ impl MdnsNode {
 
     /// Withdraw our announcement so peers drop us promptly instead of timing out.
     pub fn shutdown(&self) {
-        if let Some(fullname) = &self.fullname {
+        if let Ok(held) = self.fullname.lock()
+            && let Some(fullname) = held.as_ref()
+        {
             let _ = self.daemon.unregister(fullname);
         }
         let _ = self.daemon.shutdown();

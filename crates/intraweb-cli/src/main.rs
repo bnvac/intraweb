@@ -322,8 +322,10 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
     channels::ensure_neighborhood(&store)?;
     channels::ensure_guestbook(&store, &identity)?;
 
-    let node = Node::start(&config, Arc::clone(&identity), Arc::clone(&store))
-        .context("could not start discovery")?;
+    let node = Arc::new(
+        Node::start(&config, Arc::clone(&identity), Arc::clone(&store))
+            .context("could not start discovery")?,
+    );
 
     // Ask neighbors what was said while we were switched off. There is no
     // server holding the history, so the only copies are the ones they kept.
@@ -365,6 +367,7 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
         site_dir: site_dir.clone(),
         started_at: now_secs(),
         limiter: Arc::new(limits::RateLimiter::new(limits::now_float())),
+        node: Some(Arc::clone(&node)),
     };
 
     // A hub tries port 80 so newcomers can type a bare hostname -- unless a

@@ -47,6 +47,9 @@ pub struct AppState {
     pub started_at: u64,
     /// Bounds what strangers can make this node store.
     pub limiter: Arc<crate::limits::RateLimiter>,
+    /// The running node, so a rename can be announced without a restart.
+    /// `None` for commands that serve nothing.
+    pub node: Option<Arc<intraweb_net::Node>>,
 }
 
 #[derive(Serialize)]
@@ -564,17 +567,31 @@ async fn put_profile(State(state): State<AppState>, body: String) -> impl IntoRe
     }
     config.tagline = edit.tagline;
 
-    match config.save(&path) {
-        Ok(()) => (
+    if let Err(err) = config.save(&path) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")).into_response();
+    }
+
+    if !renamed {
+        return (StatusCode::OK, "Saved.").into_response();
+    }
+
+    // Announce the new name now. The config is already written, so a failure
+    // here means the name is saved but not yet announced -- worth saying,
+    // because a restart would then fix it.
+    match state
+        .node
+        .as_ref()
+        .map(|node| node.rename(&config.sanitized_nickname()))
+    {
+        Some(Ok(())) => {
+            (StatusCode::OK, "Saved, and your neighbors have been told.").into_response()
+        }
+        Some(Err(err)) => (
             StatusCode::OK,
-            if renamed {
-                "Saved. Neighbors see the new name once you restart the node."
-            } else {
-                "Saved."
-            },
+            format!("Saved, but the new name could not be announced ({err:#}). Restart to fix."),
         )
             .into_response(),
-        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")).into_response(),
+        None => (StatusCode::OK, "Saved.").into_response(),
     }
 }
 
