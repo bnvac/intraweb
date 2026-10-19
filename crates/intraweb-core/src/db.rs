@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 pub struct Store {
     conn: Connection,
@@ -56,6 +56,7 @@ impl Store {
             (3, SCHEMA_V3),
             (4, SCHEMA_V4),
             (5, SCHEMA_V5),
+            (6, SCHEMA_V6),
         ] {
             if current >= version {
                 continue;
@@ -381,8 +382,8 @@ impl Store {
     pub fn store_post(&self, sealed: &SignedPost, body: &str, readable: bool) -> Result<bool> {
         let changed = self.conn.execute(
             "INSERT OR IGNORE INTO channel_posts
-                (channel_id, from_peer, body, readable, created_at, signature)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (channel_id, from_peer, body, readable, created_at, signature, envelope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 sealed.post.channel.to_hex(),
                 sealed.post.from.to_hex(),
@@ -390,9 +391,42 @@ impl Store {
                 readable as i64,
                 sealed.post.created_at as i64,
                 sealed.signature,
+                serde_json::to_string(sealed).unwrap_or_default(),
             ],
         )?;
         Ok(changed > 0)
+    }
+
+    /// Envelopes of posts in a channel after a given time, newest-capped.
+    ///
+    /// Returned exactly as they arrived, so a peer rebuilding its history
+    /// verifies the same bytes that were originally signed.
+    pub fn envelopes_since(
+        &self,
+        channel_id: ChannelId,
+        since: u64,
+        limit: u32,
+    ) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT envelope FROM channel_posts
+             WHERE channel_id = ?1 AND created_at >= ?2 AND envelope IS NOT NULL
+             ORDER BY created_at ASC, id ASC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![channel_id.to_hex(), since as i64, limit], |row| {
+            row.get(0)
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// When we last heard anything in a channel, so backfill can ask for the
+    /// gap rather than the whole history every time.
+    pub fn newest_post_at(&self, channel_id: ChannelId) -> Result<u64> {
+        let newest: Option<i64> = self.conn.query_row(
+            "SELECT MAX(created_at) FROM channel_posts WHERE channel_id = ?1",
+            params![channel_id.to_hex()],
+            |r| r.get(0),
+        )?;
+        Ok(newest.unwrap_or(0) as u64)
     }
 
     /// Recent messages, oldest first so they read as a conversation.
@@ -670,6 +704,15 @@ CREATE INDEX IF NOT EXISTS idx_mail_pending
 /// v3: fingerprints stored for lookalike detection, and a blocklist.
 /// v5: an attachment is a file in the sender's shared folder, named here.
 /// The bytes are never copied into the message.
+/// v6: keep the envelope a post arrived in, so it can be handed on verbatim.
+///
+/// Backfill has to serve exactly the bytes that were signed. The decoded body
+/// is not enough -- a private post is stored decrypted where we hold the key,
+/// and re-serializing risks differing by a byte and breaking the signature.
+const SCHEMA_V6: &str = r#"
+ALTER TABLE channel_posts ADD COLUMN envelope TEXT;
+"#;
+
 const SCHEMA_V5: &str = r#"
 ALTER TABLE mail ADD COLUMN attachment TEXT;
 "#;
@@ -974,6 +1017,59 @@ mod tests {
             .map(|p| p.body)
             .collect();
         assert_eq!(bodies, vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn a_post_is_handed_on_exactly_as_it_arrived() {
+        // Backfill must serve the bytes that were signed. Re-serializing a
+        // decoded post risks differing by a byte and breaking the signature.
+        let store = Store::open_in_memory().unwrap();
+        let alice = Identity::generate().unwrap();
+        let sealed = post_from(&alice, ChannelId::neighborhood(), "gate open");
+        store.store_post(&sealed, "gate open", true).unwrap();
+
+        let envelopes = store
+            .envelopes_since(ChannelId::neighborhood(), 0, 10)
+            .unwrap();
+        assert_eq!(envelopes.len(), 1);
+
+        let round_tripped: SignedPost = serde_json::from_str(&envelopes[0]).unwrap();
+        round_tripped
+            .accept()
+            .expect("the signature must still verify");
+        assert_eq!(round_tripped.post, sealed.post);
+    }
+
+    #[test]
+    fn backfill_asks_only_for_the_gap() {
+        let store = Store::open_in_memory().unwrap();
+        let alice = Identity::generate().unwrap();
+        let channel = ChannelId::neighborhood();
+
+        for at in [100u64, 200, 300] {
+            let mut sealed = post_from(&alice, channel, &format!("at {at}"));
+            sealed.post.created_at = at;
+            // Re-sign, because the time is covered by the signature.
+            let resealed = SignedPost::seal(sealed.post.clone(), &alice).unwrap();
+            store
+                .store_post(&resealed, &format!("at {at}"), true)
+                .unwrap();
+        }
+
+        assert_eq!(store.newest_post_at(channel).unwrap(), 300);
+        assert_eq!(store.envelopes_since(channel, 200, 10).unwrap().len(), 2);
+        assert_eq!(store.envelopes_since(channel, 400, 10).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_channel_with_nothing_said_has_no_newest_post() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(
+            store
+                .newest_post_at(ChannelId::new_private().unwrap())
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

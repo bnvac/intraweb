@@ -140,6 +140,109 @@ async fn deliver_post(peer: &Peer, sealed: &SignedPost) -> Result<()> {
     Ok(())
 }
 
+/// Ask one peer for what we missed in a channel, and file whatever checks out.
+///
+/// Returns how many posts were new to us. Everything is verified here exactly
+/// as it would be on arrival: a peer handing back history is no more trusted
+/// than one announcing it in the first place.
+pub async fn backfill_from(
+    store: &Arc<Mutex<Store>>,
+    peer: &Peer,
+    channel: ChannelId,
+    since: u64,
+) -> Result<usize> {
+    let addr = peer
+        .preferred_addr()
+        .context("that peer has no address yet")?;
+    let path = format!("/api/channels/{}/backfill?since={since}", channel.to_hex());
+
+    let response = http::get(addr, peer.api_port, &path, DELIVER_TIMEOUT).await?;
+    anyhow::ensure!(
+        response.is_success(),
+        "{} answered {}",
+        peer.nickname,
+        response.status
+    );
+
+    let envelopes: Vec<SignedPost> =
+        serde_json::from_str(&response.body).context("that peer sent history we cannot read")?;
+
+    let channel_key = {
+        let store = store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the store is busy"))?;
+        store.channel_key(channel)?
+    };
+
+    let mut filed = 0;
+    for sealed in envelopes {
+        // Unsigned or misattributed history is simply dropped.
+        if sealed.accept().is_err() || sealed.post.channel != channel {
+            continue;
+        }
+
+        let (body, readable) = match &channel_key {
+            Some(key) => match sealed.post.open(key) {
+                Ok(plain) => (plain, true),
+                Err(_) => (sealed.post.body.clone(), false),
+            },
+            None if sealed.post.encrypted => (sealed.post.body.clone(), false),
+            None => (sealed.post.body.clone(), true),
+        };
+
+        let store = store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the store is busy"))?;
+        if store.store_post(&sealed, &body, readable).unwrap_or(false) {
+            filed += 1;
+        }
+    }
+    Ok(filed)
+}
+
+/// Catch up on every channel we know, from whoever is in range.
+///
+/// A node that was switched off has no way to learn what was said while it
+/// was away -- there is no server holding the history, only neighbors who
+/// each kept their own copy. Asking them is the only way back.
+pub async fn catch_up(store: &Arc<Mutex<Store>>, peers: &[Peer]) -> usize {
+    if peers.is_empty() {
+        return 0;
+    }
+
+    let channels = {
+        let Ok(store) = store.lock() else { return 0 };
+        store.channels().unwrap_or_default()
+    };
+
+    let mut filed = 0;
+    for channel in channels {
+        let since = {
+            let Ok(store) = store.lock() else { continue };
+            // Overlap a little, so a post that arrived in the same second as
+            // our newest one is not stepped over.
+            store
+                .newest_post_at(channel.channel_id)
+                .unwrap_or(0)
+                .saturating_sub(1)
+        };
+
+        for peer in peers {
+            match backfill_from(store, peer, channel.channel_id, since).await {
+                Ok(count) => filed += count,
+                Err(err) => {
+                    tracing::debug!(from = %peer.nickname, %err, "could not catch up");
+                }
+            }
+        }
+    }
+
+    if filed > 0 {
+        tracing::info!(filed, "caught up on what was said while we were away");
+    }
+    filed
+}
+
 /// Start a private channel with ourselves as its first member.
 pub fn create_private(store: &Mutex<Store>, identity: &Identity, name: &str) -> Result<ChannelId> {
     let channel = ChannelId::new_private()?;
@@ -395,6 +498,42 @@ mod tests {
         assert_eq!(
             store.lock().unwrap().posts(book, 10).unwrap()[0].body,
             "nice page"
+        );
+    }
+
+    #[tokio::test]
+    async fn catching_up_with_nobody_in_range_does_nothing() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        ensure_neighborhood(&store).unwrap();
+        assert_eq!(catch_up(&store, &[]).await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_peer_does_not_stop_the_catch_up() {
+        // One neighbor being gone must not abandon the rest of the sweep.
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let bob = Identity::generate().unwrap();
+        ensure_neighborhood(&store).unwrap();
+
+        let gone = Peer {
+            peer_id: bob.peer_id(),
+            encryption_key: None,
+            fingerprint: bob.peer_id().fingerprint(),
+            nickname: "bob".into(),
+            addrs: vec![std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)],
+            api_port: 1,
+            is_hub: false,
+            hub_name: None,
+            source: intraweb_core::DiscoverySource::Mdns,
+            trust: intraweb_core::TrustState::Known,
+            first_seen: 0,
+            last_seen: 0,
+        };
+
+        assert_eq!(
+            catch_up(&store, &[gone]).await,
+            0,
+            "it returns rather than failing"
         );
     }
 

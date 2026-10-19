@@ -325,6 +325,22 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
     let node = Node::start(&config, Arc::clone(&identity), Arc::clone(&store))
         .context("could not start discovery")?;
 
+    // Ask neighbors what was said while we were switched off. There is no
+    // server holding the history, so the only copies are the ones they kept.
+    {
+        let store = Arc::clone(&store);
+        let roster = node.roster.clone();
+        tokio::spawn(async move {
+            // Give discovery a moment to find somebody worth asking.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let mut ticker = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                channels::catch_up(&store, &roster.peers()).await;
+                ticker.tick().await;
+            }
+        });
+    }
+
     // Anything queued leaves as soon as its recipient turns up. This is the
     // whole of store-and-forward: the sender keeps trying, nobody relays.
     {
@@ -1153,8 +1169,13 @@ fn suffix(port: u16) -> String {
 
 fn init_logging() {
     use tracing_subscriber::{EnvFilter, fmt};
-    let filter = EnvFilter::try_from_env("INTRAWEB_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("intraweb_net=info,intraweb_cli=info,warn"));
+    let filter = EnvFilter::try_from_env("INTRAWEB_LOG").unwrap_or_else(
+        |_| // The binary's target is `intraweb`, so that -- not the crate name
+        // `intraweb_cli` -- is the root of its module paths. Filtering on the
+        // crate name matched nothing, which quietly hid every info log the
+        // CLI side emits.
+        EnvFilter::new("intraweb=info,intraweb_net=info,warn"),
+    );
     fmt()
         .with_env_filter(filter)
         .with_target(false)

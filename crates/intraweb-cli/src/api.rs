@@ -796,6 +796,43 @@ async fn receive_invite(State(state): State<AppState>, body: String) -> impl Int
     (StatusCode::OK, "joined").into_response()
 }
 
+/// Most posts we will hand over in one catch-up.
+const MAX_BACKFILL: u32 = 200;
+
+/// Hand a peer the history it missed while it was switched off.
+///
+/// Posts are served exactly as they arrived. A private channel's posts are
+/// ciphertext, so serving them to somebody who is not a member gives nothing
+/// away -- the encryption is the access control, and the 256-bit channel id
+/// they had to know to ask is itself something only members are told.
+async fn backfill(
+    State(state): State<AppState>,
+    Path(channel_hex): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let Some(channel) = ChannelId::parse_hex(&channel_hex) else {
+        return (StatusCode::BAD_REQUEST, "not a valid channel id").into_response();
+    };
+    let since: u64 = params
+        .get("since")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    let envelopes = state
+        .store
+        .lock()
+        .ok()
+        .and_then(|store| store.envelopes_since(channel, since, MAX_BACKFILL).ok())
+        .unwrap_or_default();
+
+    // Already JSON, so pass it through rather than decoding and re-encoding.
+    (
+        [("content-type", "application/json")],
+        format!("[{}]", envelopes.join(",")),
+    )
+        .into_response()
+}
+
 async fn list_channels(State(state): State<AppState>) -> impl IntoResponse {
     let channels = state
         .store
@@ -946,6 +983,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/channels/post", post(receive_post))
         .route("/api/channels/invite", post(receive_invite))
         .route("/api/channels/{channel}/posts", get(channel_posts))
+        .route("/api/channels/{channel}/backfill", get(backfill))
         .route("/api/channels/{channel}/say", post(say_in_channel))
         .route(
             "/api/channels/{channel}/invite/{peer}",
