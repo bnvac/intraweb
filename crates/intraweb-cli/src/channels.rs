@@ -295,20 +295,20 @@ pub async fn invite(
         .encryption_key
         .context("that neighbor is not in range, so there is no key to seal the invitation to")?;
 
-    let (channel_key, name) = {
+    let (channel_key, name, net) = {
         let store = store
             .lock()
             .map_err(|_| anyhow::anyhow!("the store is busy"))?;
         let key = store
             .channel_key(channel)?
             .context("you do not hold that channel's key, so you cannot invite anyone")?;
-        let name = store
+        let record = store
             .channels()?
             .into_iter()
-            .find(|c| c.channel_id == channel)
-            .map(|c| c.name)
-            .unwrap_or_else(|| "channel".to_string());
-        (key, name)
+            .find(|c| c.channel_id == channel);
+        let net = record.as_ref().and_then(|c| c.net_id);
+        let name = record.map_or_else(|| "channel".to_string(), |c| c.name);
+        (key, name, net)
     };
 
     let invitation = Invite::create(
@@ -319,6 +319,7 @@ pub async fn invite(
         channel,
         &name,
         &channel_key,
+        net,
     )?;
 
     let addr = peer

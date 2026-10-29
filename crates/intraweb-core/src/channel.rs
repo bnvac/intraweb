@@ -299,6 +299,10 @@ pub struct Invite {
     pub to: PeerId,
     pub created_at: u64,
     pub wrapped_key: sealed::WrappedKey,
+    /// The net the channel belongs to, so it is filed in the same place on
+    /// the invitee's side. Signed when present, so it cannot be moved.
+    #[serde(default)]
+    pub net: Option<crate::net::NetId>,
     pub signature: String,
 }
 
@@ -312,6 +316,7 @@ impl Invite {
         channel: ChannelId,
         name: &str,
         channel_key: &[u8; 32],
+        net: Option<crate::net::NetId>,
     ) -> Result<Self> {
         let wrapped = sealed::wrap_for(sealing, recipient_key, channel_key)?;
         let mut invite = Self {
@@ -322,6 +327,7 @@ impl Invite {
             to: recipient,
             created_at: now_secs(),
             wrapped_key: wrapped,
+            net,
             signature: String::new(),
         };
         invite.signature = B64.encode(identity.sign(&invite.signing_bytes()));
@@ -329,8 +335,14 @@ impl Invite {
     }
 
     fn signing_bytes(&self) -> Vec<u8> {
+        // Appended only when present, so an invitation without a net signs
+        // exactly as it always did.
+        let net = self
+            .net
+            .map(|net| format!("|net:{}", net.to_hex()))
+            .unwrap_or_default();
         format!(
-            "{INVITE_DOMAIN}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "{INVITE_DOMAIN}|{}|{}|{}|{}|{}|{}|{}|{}{net}",
             self.version,
             self.channel.to_hex(),
             B64.encode(self.name.as_bytes()),
@@ -664,6 +676,7 @@ mod tests {
             channel,
             "crew",
             &key,
+            None,
         )
         .unwrap();
 
@@ -692,6 +705,7 @@ mod tests {
             ChannelId::new_private().unwrap(),
             "crew",
             &key,
+            None,
         )
         .unwrap();
 
@@ -718,11 +732,40 @@ mod tests {
             ChannelId::new_private().unwrap(),
             "crew",
             &key,
+            None,
         )
         .unwrap();
         invite.from = alice.peer_id();
 
         assert!(invite.accept(bob.peer_id(), &bk, &ak.public()).is_err());
+    }
+
+    #[test]
+    fn an_invitations_net_is_signed_and_cannot_be_moved() {
+        let (alice, bob) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let (ak, bk) = (SealingKey::derive(&alice), SealingKey::derive(&bob));
+        let key = new_channel_key().unwrap();
+        let (net, _) = crate::net::NetId::found(alice.peer_id()).unwrap();
+        let invite = Invite::create(
+            &alice,
+            &ak,
+            bob.peer_id(),
+            &bk.public(),
+            ChannelId::new_private().unwrap(),
+            "crew",
+            &key,
+            Some(net),
+        )
+        .unwrap();
+        assert!(invite.accept(bob.peer_id(), &bk, &ak.public()).is_ok());
+
+        let mut moved = invite.clone();
+        moved.net = Some(crate::net::NetId::found(alice.peer_id()).unwrap().0);
+        assert!(moved.accept(bob.peer_id(), &bk, &ak.public()).is_err());
+
+        let mut stripped = invite;
+        stripped.net = None;
+        assert!(stripped.accept(bob.peer_id(), &bk, &ak.public()).is_err());
     }
 
     #[test]
@@ -738,6 +781,7 @@ mod tests {
             ChannelId::new_private().unwrap(),
             "crew",
             &key,
+            None,
         )
         .unwrap();
 

@@ -1310,6 +1310,9 @@ async fn receive_invite(State(state): State<AppState>, body: String) -> impl Int
         .upsert_channel(invite.channel, &invite.name, true, Some(&channel_key), now)
         .and_then(|()| store.add_member(invite.channel, state.identity.peer_id(), now))
         .and_then(|()| store.add_member(invite.channel, invite.from, now))
+        // Filed under the same net as on the inviter's side. Signed, so it
+        // cannot have been moved on the way.
+        .and_then(|()| store.set_channel_net(invite.channel, invite.net, "chat"))
     {
         return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
     }

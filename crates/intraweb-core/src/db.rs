@@ -6,12 +6,13 @@
 use crate::channel::{ChannelId, SignedPost};
 use crate::identity::PeerId;
 use crate::mail::{Mail, SignedMail};
+use crate::net::NetId;
 use crate::peer::TrustState;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 pub struct Store {
     conn: Connection,
@@ -58,6 +59,7 @@ impl Store {
             (5, SCHEMA_V5),
             (6, SCHEMA_V6),
             (7, SCHEMA_V7),
+            (8, SCHEMA_V8),
         ] {
             if current >= version {
                 continue;
@@ -308,7 +310,8 @@ impl Store {
             // question as "holds a key" -- asking only the latter labelled the
             // neighborhood channel unreadable.
             "SELECT channel_id, name, is_private,
-                    (is_private = 0 OR channel_key IS NOT NULL) AS can_read, created_at
+                    (is_private = 0 OR channel_key IS NOT NULL) AS can_read, created_at,
+                    net_id, role
              FROM channels ORDER BY is_private, name",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -319,9 +322,69 @@ impl Store {
                 is_private: row.get::<_, i64>(2)? != 0,
                 can_read: row.get::<_, i64>(3)? != 0,
                 created_at: row.get::<_, i64>(4)? as u64,
+                net_id: row
+                    .get::<_, Option<String>>(5)?
+                    .and_then(|hex| NetId::parse_hex(&hex)),
+                role: row.get(6)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Say which net a channel belongs to and what it is for.
+    pub fn set_channel_net(
+        &self,
+        channel_id: ChannelId,
+        net: Option<NetId>,
+        role: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE channels SET net_id = ?2, role = ?3 WHERE channel_id = ?1",
+            params![channel_id.to_hex(), net.map(NetId::to_hex), role],
+        )?;
+        Ok(())
+    }
+
+    /// Stop following a channel. What was said in it is kept: leaving a net
+    /// should not erase a conversation somebody might want to read back.
+    pub fn forget_channel(&self, channel_id: ChannelId) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM channels WHERE channel_id = ?1",
+            params![channel_id.to_hex()],
+        )?;
+        Ok(())
+    }
+
+    /// Every post in a channel as signed: author, time, body and signature.
+    /// What a net's state is folded from.
+    pub fn channel_log(&self, channel_id: ChannelId, limit: u32) -> Result<Vec<LogEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT from_peer, created_at, body, signature FROM channel_posts
+             WHERE channel_id = ?1 ORDER BY created_at, signature LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![channel_id.to_hex(), limit], |row| {
+            let from: String = row.get(0)?;
+            Ok((
+                from,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (from, at, body, signature) = row?;
+            // A row we cannot attribute is not evidence of anything.
+            if let Some(from) = PeerId::parse_hex(&from) {
+                out.push(LogEntry {
+                    from,
+                    at: at as u64,
+                    body,
+                    signature,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// The key for a private channel, if we have been admitted to it.
@@ -623,6 +686,20 @@ pub struct ChannelRecord {
     /// Whether we hold the key, i.e. whether we can read it.
     pub can_read: bool,
     pub created_at: u64,
+    /// The net it belongs to; `None` for the neighborhood and guestbooks.
+    pub net_id: Option<NetId>,
+    /// `chat` for a conversation, `governance` for a net's log, `directory`
+    /// for the list of nets.
+    pub role: String,
+}
+
+/// One signed post as stored, for folding into a net's state.
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub from: PeerId,
+    pub at: u64,
+    pub body: String,
+    pub signature: String,
 }
 
 /// One stored message.
@@ -709,6 +786,15 @@ CREATE TABLE IF NOT EXISTS mail (
 );
 CREATE INDEX IF NOT EXISTS idx_mail_pending
     ON mail (direction, delivered_at) WHERE delivered_at IS NULL;
+"#;
+
+/// Nets: which net a channel belongs to, and what it is for. A net's
+/// governance log and the net directory are channels like any other, so they
+/// get delivery, storage and backfill for free -- they are only kept out of
+/// the list of conversations.
+const SCHEMA_V8: &str = r#"
+ALTER TABLE channels ADD COLUMN net_id TEXT;
+ALTER TABLE channels ADD COLUMN role TEXT NOT NULL DEFAULT 'chat';
 "#;
 
 /// The file a post offers, kept as a column so listing a channel does not
