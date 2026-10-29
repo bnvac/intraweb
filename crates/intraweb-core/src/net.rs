@@ -250,8 +250,9 @@ pub struct MotionState {
     pub successor: Option<PeerId>,
     /// Why it closed, in words a person can read.
     pub outcome: Option<String>,
-    #[serde(skip)]
-    eligible_keys: Vec<String>,
+    /// Who may vote, as 16-hex key prefixes. Public, like everything in the
+    /// log, so a member can see whether their vote will count.
+    pub eligible_keys: Vec<String>,
     #[serde(skip)]
     yes_signatures: Vec<String>,
 }

@@ -300,6 +300,11 @@ pub async fn vote(
         open.status == net::MotionStatus::Open,
         "that vote is already closed"
     );
+    ensure!(
+        open.eligible_keys
+            .contains(&net::short_key(identity.peer_id())),
+        "you joined after this vote opened, so it is not yours to decide"
+    );
     post(
         store,
         identity,

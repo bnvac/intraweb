@@ -22,6 +22,13 @@
   <div class="presence"><span class="dot"></span><span id="presence-text">connecting</span></div>
 </header>
 
+<!-- A net leader's ping. Shown until dismissed, because the point of a ping
+     is that it is not missed. -->
+<div id="ping-banner" class="ping-banner" role="alert" hidden>
+  <span id="ping-text"></span>
+  <button type="button" id="ping-dismiss" class="quiet">Dismiss</button>
+</div>
+
 <div class="layout">
 
   <!-- Left column: who you are. The profile panel, minus the glitter. -->
@@ -141,6 +148,59 @@
       </div>
     </section>
 
+    <section class="module" aria-labelledby="nets-heading">
+      <h2 class="module-head" id="nets-heading">
+        Nets <span class="module-meta" id="nets-meta"></span>
+      </h2>
+      <div class="module-body">
+        <div id="net-directory" class="stack"></div>
+        <p id="net-result" class="aside-note" aria-live="polite"></p>
+        <details class="new-channel">
+          <summary>Start a net</summary>
+          <form id="new-net-form" autocomplete="off">
+            <div class="field-row">
+              <input id="new-net-name" placeholder="net name" maxlength="40" required>
+              <button type="submit">Start</button>
+            </div>
+            <p class="aside-note">A net is open: anyone in range can find it and join.
+               You lead it until its members decide otherwise.</p>
+          </form>
+        </details>
+
+        <div id="net-detail" class="net-detail" hidden>
+          <h3 class="net-title" id="net-title"></h3>
+          <p class="net-leader" id="net-leader"></p>
+          <div id="net-announcements" class="stack"></div>
+          <div id="net-motions" class="stack"></div>
+          <h4 class="net-sub">Members</h4>
+          <div id="net-members" class="stack"></div>
+
+          <div id="net-leader-tools" class="net-tools" hidden>
+            <h4 class="net-sub">You lead this net</h4>
+            <form id="announce-form" autocomplete="off">
+              <div class="field-row">
+                <input id="announce-text" placeholder="announce to everyone in the net" maxlength="500">
+                <button type="submit">Announce</button>
+              </div>
+              <label class="toggle"><input type="checkbox" id="announce-ping">
+                <span>Ping everyone (at most once every ten minutes)</span></label>
+            </form>
+            <label class="toggle"><input type="checkbox" id="net-low-data">
+              <span>Mandatory low data: nobody attaches files or sees pictures here</span></label>
+          </div>
+
+          <details class="net-history">
+            <summary>What happened</summary>
+            <div id="net-history"></div>
+          </details>
+          <p class="aside-note">A vote counts the members who had joined when it
+             opened, so keys made to swing it count for nothing. A net is open,
+             though: somebody who prepared many keys in advance could still sway one.</p>
+        </div>
+        <p class="aside-note"><button type="button" id="enable-notifications" class="quiet">Show pings as notifications</button></p>
+      </div>
+    </section>
+
     <section class="module" aria-labelledby="channels-heading">
       <h2 class="module-head" id="channels-heading">
         Channels <span class="module-meta" id="channel-meta"></span>
@@ -171,6 +231,7 @@
           <form id="new-channel-form" autocomplete="off">
             <div class="field-row">
               <input id="new-channel-name" placeholder="channel name" maxlength="40" required>
+              <select id="new-channel-net" aria-label="Net it belongs to"></select>
               <button type="submit">Create</button>
             </div>
             <p class="aside-note">Only people you invite can read it. Invite a
@@ -255,6 +316,7 @@
 
 <footer class="colophon">
   intraweb &middot; nobody hosts you but you
+  <span id="footer-leader"></span>
 </footer>
 
 <script src="/app.js"></script>

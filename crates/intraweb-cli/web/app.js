@@ -132,6 +132,38 @@ function lowData() {
   return Boolean(lastStatus && lastStatus.low_data);
 }
 
+// Nets: what the directory lists, and the full state of the ones we are in.
+let netsList = [];
+let netDetails = new Map();
+// The net open in the Nets panel, which follows the channel you are in.
+let viewNetId = null;
+
+function netName(netId) {
+  const listed = netsList.find((n) => n.net_id === netId);
+  return listed ? listed.name : "a net";
+}
+
+/// The net the channel being read belongs to, with its state, if we are in it.
+function currentNet() {
+  const id = selectedChannel && selectedChannel.net_id;
+  return id ? netDetails.get(id) || null : null;
+}
+
+/// Pictures off for this channel: by your own choice, or by its net's leader.
+function channelLowData() {
+  const net = currentNet();
+  return lowData() || Boolean(net && net.net.low_data_mandatory);
+}
+
+/// A channel's name as shown: net channels carry their net, so "general"
+/// in two nets cannot be mistaken for one another.
+function channelLabel(channel) {
+  if (!channel.net_id) return `${channel.is_private ? "\u25cf " : "#"}${channel.name}`;
+  const net = netName(channel.net_id);
+  const short = channel.name.startsWith(`${net} `) ? channel.name.slice(net.length + 1) : channel.name;
+  return `${net} \u203a ${channel.is_private ? "\u25cf " : "#"}${short}`;
+}
+
 /// A post's or letter's time: the clock alone for today, the date otherwise.
 function clock(seconds) {
   const when = new Date(seconds * 1000);
@@ -175,12 +207,16 @@ function offeredFile(path, peerId) {
   const url = ours
     ? `/files/${encodeURI(path)}`
     : `http://${host}:${sender.api_port}/files/${encodeURI(path)}`;
-  if (PICTURE.test(path) && !lowData()) {
+  if (PICTURE.test(path) && !channelLowData()) {
     return `<a class="attached" href="${url}" target="_blank" rel="noopener">
       <img src="${url}" alt="${name}" loading="lazy"
            onerror="this.replaceWith(document.createTextNode('picture unavailable: ${name}'))"></a>`;
   }
-  const note = PICTURE.test(path) ? " (picture &mdash; not loaded in low data mode)" : "";
+  const note = PICTURE.test(path)
+    ? lowData()
+      ? " (picture &mdash; not loaded in low data mode)"
+      : " (picture &mdash; this net's leader has made low data mandatory)"
+    : "";
   return `<a class="attached" href="${url}" target="_blank" rel="noopener">&#128206; ${name}${note}</a>`;
 }
 
@@ -326,8 +362,11 @@ function renderGuestbook(entries) {
 function renderChannels(allChannels, status) {
   const tabs = document.getElementById("channel-tabs");
   // Our own guestbook has a panel of its own; listing it here as well would
-  // just be the same thing twice.
-  const channels = allChannels.filter((c) => c.channel_id !== status.guestbook_channel);
+  // just be the same thing twice. A net's log and the directory are records,
+  // not conversations, and have the Nets panel.
+  const channels = allChannels.filter(
+    (c) => c.channel_id !== status.guestbook_channel && c.role === "chat",
+  );
 
   if (!selectedChannelId && !steppedOut && channels.length) {
     const neighborhood = channels.find((c) => !c.is_private) || channels[0];
@@ -347,7 +386,7 @@ function renderChannels(allChannels, status) {
                 channel.can_read ? "" : "locked"
               }"
               data-channel="${escapeHtml(channel.channel_id)}">
-        ${channel.is_private ? "&#9679; " : ""}${escapeHtml(channel.name)}
+        ${escapeHtml(channelLabel(channel))}
       </button>`,
     )
     .join("");
@@ -369,14 +408,17 @@ function renderChannels(allChannels, status) {
 let whereaboutsKey = "";
 function renderWhereabouts(channels) {
   const select = document.getElementById("header-channel");
-  const key = JSON.stringify([channels.map((c) => [c.channel_id, c.name, c.is_private]), selectedChannelId]);
+  const key = JSON.stringify([
+    channels.map((c) => [c.channel_id, channelLabel(c)]),
+    selectedChannelId,
+  ]);
   if (key === whereaboutsKey) return;
   whereaboutsKey = key;
   select.innerHTML =
     channels
       .map(
         (c) => `<option value="${escapeHtml(c.channel_id)}" ${c.channel_id === selectedChannelId ? "selected" : ""}>
-          \u00b7 in ${c.is_private ? "\u25cf " : "#"}${escapeHtml(c.name)}</option>`,
+          \u00b7 in ${escapeHtml(channelLabel(c))}</option>`,
       )
       .join("") +
     `<option value="" ${selectedChannelId ? "" : "selected"}>\u00b7 stepped out</option>`;
@@ -385,6 +427,8 @@ function renderWhereabouts(channels) {
 let lastPostsHtml = "";
 function renderPosts(posts, { force = false } = {}) {
   const box = document.getElementById("channel-posts");
+  const here = currentNet();
+  const leaderHere = here && here.net.leader;
   const html = steppedOut
     ? '<p class="empty">You stepped out. Pick a channel at the top to step back in.</p>'
     : posts.length
@@ -394,7 +438,9 @@ function renderPosts(posts, { force = false } = {}) {
         <div class="post ${post.readable ? "" : "sealed"}">
           <time class="when" datetime="${new Date(post.created_at * 1000).toISOString()}"
                 title="${escapeHtml(new Date(post.created_at * 1000).toLocaleString())}">${escapeHtml(clock(post.created_at))}</time>
-          <span class="who named" title="${escapeHtml(post.fingerprint)}">${whoIs(post.from, post.fingerprint)}</span>
+          <span class="who named" title="${escapeHtml(post.fingerprint)}">${whoIs(post.from, post.fingerprint)}${
+            leaderHere && post.from === leaderHere ? '<span class="badge-leader">net leader</span>' : ""
+          }</span>
           <span class="said">${
             post.readable
               ? escapeHtml(post.body)
@@ -445,7 +491,9 @@ async function refresh() {
     renderContacts(contacts, state.status.now);
     renderActivity(activity, state.status, state.peers);
     renderMail(state.mail, state.status.now, state.peers);
+    await refreshNets();
     renderChannels(await getJson("/api/channels"), state.status);
+    renderNetDetail();
     renderGuestbook(await getJson("/api/guestbook"));
     await refreshChannel();
   } catch (err) {
@@ -494,6 +542,7 @@ document.addEventListener("click", async (event) => {
   if (tab) {
     selectedChannelId = tab.dataset.channel;
     steppedOut = false;
+    viewNetId = null; // follow the channel's net
     await refresh();
     await refreshChannel({ force: true });
     return;
@@ -594,7 +643,10 @@ document.getElementById("new-channel-form").addEventListener("submit", async (ev
   const response = await fetch("/api/channels/new", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: name.value }),
+    body: JSON.stringify({
+      name: name.value,
+      net: document.getElementById("new-channel-net").value || null,
+    }),
   });
   if (response.ok) {
     selectedChannelId = (await response.text()).trim();
@@ -906,6 +958,7 @@ document.getElementById("toggle-low-data").addEventListener("change", (event) =>
 document.getElementById("header-channel").addEventListener("change", async (event) => {
   selectedChannelId = event.target.value || null;
   steppedOut = !selectedChannelId;
+  viewNetId = null; // follow the channel's net
   await refresh();
   await refreshChannel({ force: true });
 });
@@ -1031,6 +1084,8 @@ function renderAttachAvailability() {
   const reasons = {
     say: lowData()
       ? "Low data mode is on, so nothing is attached."
+      : channelLowData()
+        ? `${netName(selectedChannel.net_id)}'s leader has made low data mandatory, so nothing is attached here.`
       : selectedChannel && selectedChannel.is_private
         ? "Private channels cannot carry files: your shared folder is public, so anyone could fetch it."
         : "",
@@ -1182,6 +1237,350 @@ function makeFoldable() {
     });
   });
 }
+
+/* ---------------------------------------------------------------- nets ---- */
+
+/* A net's state is folded on the node from its signed log; the page only
+   shows it and posts what the operator decides. Every refusal comes back from
+   the node in words, and is shown as it came. */
+
+async function refreshNets() {
+  try {
+    netsList = await getJson("/api/nets");
+  } catch (err) {
+    netsList = [];
+  }
+  const joined = netsList.filter((n) => n.joined);
+  const details = await Promise.all(
+    joined.map((n) => getJson(`/api/nets/${n.net_id}`).catch(() => null)),
+  );
+  netDetails = new Map();
+  joined.forEach((n, i) => {
+    if (details[i]) netDetails.set(n.net_id, details[i]);
+  });
+  if (viewNetId && !netsList.some((n) => n.net_id === viewNetId)) viewNetId = null;
+  renderNetDirectory();
+  renderChannelNetChoices();
+  notifyPings();
+}
+
+/// A key as a person, using the net's own names first: members of a net you
+/// joined today may never have crossed your roster.
+function memberName(hex, names) {
+  const known = lastPeers.some((p) => p.peer_id === hex) || contactsByKey.has(hex);
+  if (known || (lastStatus && hex === lastStatus.peer_id)) return whoIs(hex);
+  const fp = contactsByKey.get(hex)?.fingerprint || hex;
+  return names && names[hex]
+    ? `${escapeHtml(names[hex])} <span class="fp-tag">${escapeHtml(fp.slice(0, 4))}</span>`
+    : escapeHtml(hex.slice(0, 9));
+}
+
+function renderNetDirectory() {
+  text(
+    "nets-meta",
+    netsList.length
+      ? `${netsList.filter((n) => n.joined).length} joined of ${netsList.length}`
+      : "none yet",
+  );
+  document.getElementById("net-directory").innerHTML = netsList.length
+    ? netsList
+        .map((n) => {
+          const meta = n.joined
+            ? `${n.members} member${n.members === 1 ? "" : "s"}${n.you_lead ? " · you lead" : ""}${
+                n.low_data_mandatory ? " · low data" : ""
+              }`
+            : `started by ${whoIs(n.founder)}`;
+          const actions = n.joined
+            ? `<button type="button" class="quiet" data-net-view="${escapeHtml(n.net_id)}">Open</button>
+               <button type="button" class="quiet danger" data-net-leave="${escapeHtml(n.net_id)}">Leave</button>`
+            : `<button type="button" data-net-join="${escapeHtml(n.net_id)}">Join</button>`;
+          return `<div class="net-row ${n.net_id === viewNetId ? "viewing" : ""}">
+            <span class="name">${escapeHtml(n.name)}</span>
+            <span class="meta">${n.joined ? escapeHtml(meta) : meta}</span>
+            ${actions}
+          </div>`;
+        })
+        .join("")
+    : '<p class="empty">No nets in range yet. Start one, and neighbors can find and join it.</p>';
+}
+
+function renderChannelNetChoices() {
+  const select = document.getElementById("new-channel-net");
+  const chosen = select.value;
+  select.innerHTML =
+    '<option value="">no net</option>' +
+    netsList
+      .filter((n) => n.joined)
+      .map((n) => `<option value="${escapeHtml(n.net_id)}">in ${escapeHtml(n.name)}</option>`)
+      .join("");
+  select.value = chosen;
+}
+
+let netModeInFlight = false;
+
+function renderNetDetail() {
+  // Following the channel you are in, unless you opened another net yourself.
+  if (!viewNetId && selectedChannel && selectedChannel.net_id) viewNetId = selectedChannel.net_id;
+  const detail = viewNetId ? netDetails.get(viewNetId) : null;
+  const box = document.getElementById("net-detail");
+  box.hidden = !detail;
+  renderFooterLeader();
+  if (!detail) return;
+
+  const { net, names } = detail;
+  const me = lastStatus.peer_id;
+  const short = me.slice(0, 16);
+  const isMember = net.members.some((m) => m.peer_id === me);
+  const iLead = net.leader === me;
+
+  text("net-title", net.name || netName(viewNetId));
+  document.getElementById("net-leader").innerHTML = net.leader
+    ? `Net leader: ${memberName(net.leader, names)}${
+        net.low_data_mandatory ? ' · <strong>low data is mandatory</strong>' : ""
+      }`
+    : "Nobody leads this net right now.";
+
+  // Announcements: newest first, always signed off as the leader's.
+  const recent = net.announcements.slice(-5).reverse();
+  document.getElementById("net-announcements").innerHTML = recent
+    .map(
+      (a) => `<div class="announcement">${a.ping ? "&#128276; " : ""}${escapeHtml(a.text)}
+        <span class="by">${memberName(a.from, names)} <span class="badge-leader">net leader</span>
+          &middot; ${escapeHtml(clock(a.at))}</span></div>`,
+    )
+    .join("");
+
+  const open = net.motions.filter((m) => m.status === "open");
+  const closed = net.motions.filter((m) => m.status !== "open").slice(-3).reverse();
+  const canImpeach =
+    isMember && net.leader && !iLead && !open.some((m) => m.kind === "impeach");
+  document.getElementById("net-motions").innerHTML =
+    open
+      .map((m) => {
+        const mine = m.votes.find(([who]) => who === me);
+        const eligible = m.eligible_keys.includes(short);
+        const what = m.kind === "impeach" ? `Impeach ${memberName(m.target, names)}` : `Remove ${memberName(m.target, names)}`;
+        const left = Math.max(0, m.closes_at - lastStatus.now);
+        return `<div class="motion open">
+          <strong>${what}</strong>
+          <div class="tally">${m.yes} yes &middot; ${m.no} no &middot; ${m.eligible} can vote, ${
+            Math.floor(m.eligible / 2) + 1
+          } carries it &middot; closes in ${escapeHtml(duration(left))}${
+            mine ? ` &middot; you voted ${mine[1] ? "yes" : "no"}` : ""
+          }</div>
+          ${
+            eligible
+              ? `<div class="actions">
+                  <button type="button" data-net-vote="${escapeHtml(m.id)}" data-yes="1">Yes</button>
+                  <button type="button" class="quiet" data-net-vote="${escapeHtml(m.id)}" data-yes="0">No</button>
+                </div>`
+              : '<div class="tally">You joined after this vote opened, so it is not yours to decide.</div>'
+          }
+        </div>`;
+      })
+      .join("") +
+    closed
+      .map(
+        (m) => `<div class="motion"><strong>${
+          m.kind === "impeach" ? "Impeach" : "Remove"
+        } ${memberName(m.target, names)}</strong>
+          <div class="tally">${escapeHtml(m.outcome || m.status)}</div></div>`,
+      )
+      .join("") +
+    (canImpeach
+      ? `<button type="button" class="quiet" data-net-impeach="${escapeHtml(net.leader)}">Move to impeach the leader</button>`
+      : "");
+
+  document.getElementById("net-members").innerHTML = net.members
+    .map(
+      (m, i) => `<div class="member">
+        ${memberName(m.peer_id, names)}${m.peer_id === net.leader ? '<span class="badge-leader">net leader</span>' : ""}
+        <span class="since">${i === 0 ? "here longest · " : ""}joined ${escapeHtml(clock(m.joined_at))}</span>
+        ${
+          iLead && m.peer_id !== me && !open.some((o) => o.kind === "kick" && o.target === m.peer_id)
+            ? `<button type="button" class="quiet danger" data-net-kick="${escapeHtml(m.peer_id)}">Call vote to remove</button>`
+            : ""
+        }
+      </div>`,
+    )
+    .join("");
+
+  document.getElementById("net-leader-tools").hidden = !iLead;
+  if (!netModeInFlight) document.getElementById("net-low-data").checked = net.low_data_mandatory;
+
+  document.getElementById("net-history").innerHTML = net.history
+    .slice(-10)
+    .reverse()
+    .map((h) => `<div>${escapeHtml(clock(h.at))} &mdash; ${escapeHtml(h.text)}</div>`)
+    .join("");
+}
+
+/// "net leader" at the bottom of the page, for the net you are in.
+function renderFooterLeader() {
+  const id = (selectedChannel && selectedChannel.net_id) || viewNetId;
+  const detail = id ? netDetails.get(id) : null;
+  document.getElementById("footer-leader").innerHTML =
+    detail && detail.net.leader
+      ? `net leader of ${escapeHtml(detail.net.name || "this net")}: ${memberName(detail.net.leader, detail.names)}`
+      : "";
+}
+
+async function netAction(path, body) {
+  const result = document.getElementById("net-result");
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    });
+    const words = await response.text();
+    result.textContent = words;
+    return response.ok ? words : null;
+  } catch (err) {
+    result.textContent = "The node did not answer.";
+    return null;
+  } finally {
+    await refresh();
+  }
+}
+
+document.addEventListener("click", async (event) => {
+  const target = event.target.closest(
+    "[data-net-join],[data-net-leave],[data-net-view],[data-net-vote],[data-net-impeach],[data-net-kick]",
+  );
+  if (!target) return;
+  const d = target.dataset;
+  target.disabled = true;
+
+  if (d.netJoin) {
+    viewNetId = d.netJoin;
+    await netAction(`/api/nets/${d.netJoin}/join`);
+  } else if (d.netLeave) {
+    if (!window.confirm(`Leave ${netName(d.netLeave)}? What was said there is kept.`)) {
+      target.disabled = false;
+      return;
+    }
+    if (viewNetId === d.netLeave) viewNetId = null;
+    await netAction(`/api/nets/${d.netLeave}/leave`);
+  } else if (d.netView) {
+    viewNetId = d.netView;
+    renderNetDirectory();
+    renderNetDetail();
+  } else if (d.netVote) {
+    await netAction(`/api/nets/${viewNetId}/vote`, { motion: d.netVote, yes: d.yes === "1" });
+  } else if (d.netImpeach) {
+    if (window.confirm("Open a vote to impeach the leader? A majority of members picks a new one at random.")) {
+      await netAction(`/api/nets/${viewNetId}/motion`, { kind: "impeach", target: d.netImpeach });
+    }
+  } else if (d.netKick) {
+    if (window.confirm("Call a vote to remove this member? The members decide; a majority removes them.")) {
+      await netAction(`/api/nets/${viewNetId}/motion`, { kind: "kick", target: d.netKick });
+    }
+  }
+  target.disabled = false;
+});
+
+document.getElementById("new-net-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const input = document.getElementById("new-net-name");
+  const created = await netAction("/api/nets/new", { name: input.value });
+  if (created) {
+    viewNetId = created.trim();
+    input.value = "";
+    await refresh();
+  }
+});
+
+document.getElementById("announce-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const input = document.getElementById("announce-text");
+  if (!input.value.trim() || !viewNetId) return;
+  const ping = document.getElementById("announce-ping");
+  if (await netAction(`/api/nets/${viewNetId}/announce`, { text: input.value, ping: ping.checked })) {
+    input.value = "";
+    ping.checked = false;
+  }
+});
+
+document.getElementById("net-low-data").addEventListener("change", async (event) => {
+  if (!viewNetId) return;
+  netModeInFlight = true;
+  try {
+    await netAction(`/api/nets/${viewNetId}/policy`, { low_data_mandatory: event.target.checked });
+  } finally {
+    netModeInFlight = false;
+  }
+});
+
+/* ---------------------------------------------------------------- pings ---- */
+
+/* A ping is shown once per browser until dismissed, and only if it is recent:
+   opening the dashboard a week later should not set off last week's alarms. */
+
+const SEEN_PINGS_KEY = "intraweb.seenPings";
+const PING_FRESH_SECS = 60 * 60;
+let shownPing = null;
+
+function seenPings() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(SEEN_PINGS_KEY) || "[]"));
+  } catch (err) {
+    return new Set();
+  }
+}
+
+function markPingSeen(id) {
+  try {
+    const seen = [...seenPings(), id].slice(-200);
+    localStorage.setItem(SEEN_PINGS_KEY, JSON.stringify(seen));
+  } catch (err) {
+    // Without storage the banner still works; it just may show again.
+  }
+}
+
+function notifyPings() {
+  if (!lastStatus || shownPing) return;
+  const seen = seenPings();
+  for (const [netId, detail] of netDetails) {
+    for (const a of detail.net.announcements) {
+      if (!a.ping || lastStatus.now - a.at > PING_FRESH_SECS) continue;
+      const id = `${netId}:${a.at}:${a.from.slice(0, 16)}`;
+      if (seen.has(id)) continue;
+      shownPing = { id, title: document.title };
+      const words = `${detail.net.name || "A net"} — net leader: ${a.text}`;
+      document.getElementById("ping-text").textContent = `\u{1F514} ${words}`;
+      document.getElementById("ping-banner").hidden = false;
+      document.title = `\u{1F514} ${shownPing.title}`;
+      try {
+        if (window.Notification && Notification.permission === "granted") {
+          new Notification(detail.net.name || "intraweb", { body: a.text });
+        }
+      } catch (err) {
+        // Some browsers refuse notifications from plain http; the banner stays.
+      }
+      return;
+    }
+  }
+}
+
+document.getElementById("ping-dismiss").addEventListener("click", () => {
+  if (!shownPing) return;
+  markPingSeen(shownPing.id);
+  document.title = shownPing.title;
+  shownPing = null;
+  document.getElementById("ping-banner").hidden = true;
+  notifyPings();
+});
+
+document.getElementById("enable-notifications").addEventListener("click", async (event) => {
+  if (!window.Notification) {
+    event.target.textContent = "This browser cannot show notifications";
+    return;
+  }
+  const answer = await Notification.requestPermission();
+  event.target.textContent =
+    answer === "granted" ? "Pings will show as notifications" : "Notifications were not allowed";
+});
 
 makeFoldable();
 loadSharedFiles();

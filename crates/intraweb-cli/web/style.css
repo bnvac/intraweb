@@ -425,3 +425,62 @@ textarea.editor {
 #say-form[hidden] { display: none; }
 /* The form rule makes every input full width; a checkbox is not a field. */
 .toggle input { width: auto; min-width: 0; flex: none; padding: 0; margin: 0; }
+
+/* ---------------------------------------------------------------- nets ---- */
+
+.net-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .6rem;
+  border: 1px solid var(--rule); border-radius: 3px; padding: .45rem .55rem;
+  font-size: .78rem;
+}
+.net-row.viewing { border-color: var(--accent); }
+.net-row .name { font-weight: 700; }
+.net-row .meta { color: var(--muted); font-size: .72rem; flex: 1; min-width: 10rem; }
+.net-row button { font-size: .72rem; padding: .2rem .5rem; }
+
+.net-detail { margin-top: .8rem; border-top: 1px dotted var(--rule); padding-top: .6rem; }
+.net-title { margin: 0; font-size: .95rem; }
+.net-leader { margin: .2rem 0 .5rem; font-size: .78rem; }
+.net-sub {
+  margin: .8rem 0 .35rem; font-size: .7rem; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--muted);
+}
+.net-tools { margin-top: .6rem; }
+.net-history summary { font-size: .75rem; color: var(--accent); cursor: pointer; margin-top: .6rem; }
+.net-history div { font-size: .74rem; color: var(--muted); margin-top: .3rem; }
+
+.badge-leader {
+  display: inline-block; font-size: .6rem; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; padding: 0 .3rem; margin-left: .3rem;
+  border: 1px solid var(--accent); color: var(--accent); border-radius: 2px;
+  vertical-align: .1em;
+}
+
+.announcement {
+  border-left: 3px solid var(--accent); padding: .35rem .55rem;
+  background: var(--paper); font-size: .8rem;
+}
+.announcement .by { display: block; margin-top: .2rem; font-size: .68rem; color: var(--muted); }
+
+.motion {
+  border: 1px solid var(--rule); border-radius: 3px; padding: .45rem .55rem; font-size: .78rem;
+}
+.motion.open { border-color: var(--alarm-rule); background: var(--alarm-bg); }
+.motion .tally { color: var(--muted); font-size: .72rem; }
+.motion .actions { display: flex; gap: .4rem; margin-top: .35rem; }
+.motion .actions button { font-size: .72rem; padding: .2rem .55rem; }
+
+.member { display: flex; align-items: center; gap: .45rem; font-size: .76rem; }
+.member .since { margin-left: auto; color: var(--muted); font-size: .68rem; white-space: nowrap; }
+.member button { font-size: .68rem; padding: .1rem .4rem; }
+
+.ping-banner {
+  display: flex; align-items: center; gap: .8rem; justify-content: space-between;
+  margin: 0 .25rem 1rem; padding: .6rem .8rem; border-radius: 3px;
+  background: var(--accent); color: var(--accent-ink); font-size: .85rem;
+}
+.ping-banner[hidden] { display: none; }
+.ping-banner button { color: var(--accent-ink); border-color: var(--accent-ink); background: transparent; }
+
+#footer-leader:not(:empty)::before { content: " \00b7 "; }
+#new-channel-net { font: inherit; font-size: .76rem; max-width: 12rem; }
