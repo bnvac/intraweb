@@ -12,6 +12,12 @@
   <div class="wordmark">
     <span class="logo">intraweb</span>
     <span class="slogan">your neighborhood web</span>
+    <!-- Where you are standing. Stepping out stops reading any channel
+         without leaving one: nothing is announced either way. -->
+    <label class="whereabouts">
+      <span class="visually-hidden">Channel you are in</span>
+      <select id="header-channel" aria-label="Channel you are in"></select>
+    </label>
   </div>
   <div class="presence"><span class="dot"></span><span id="presence-text">connecting</span></div>
 </header>
@@ -47,6 +53,16 @@
           <dt>up</dt><dd id="me-uptime">&mdash;</dd>
         </dl>
         <button type="button" id="start-edit" class="quiet wide">Edit profile</button>
+        <div class="avatar-controls">
+          <label class="file-pick">
+            <span>Profile picture (PNG, JPEG, GIF or WebP, under 512KB)</span>
+            <input type="file" id="avatar-upload" accept="image/png,image/jpeg,image/gif,image/webp">
+          </label>
+          <div class="field-row end">
+            <span id="avatar-result" class="aside-note"></span>
+            <button type="button" id="avatar-reset" class="quiet">Use key picture</button>
+          </div>
+        </div>
         <p class="aside-note">Read the fingerprint aloud to a neighbor and they
            can mark you verified. The picture is drawn from your key: if a
            neighbor's shape changes, so did their key.</p>
@@ -61,6 +77,34 @@
           <dt>serving</dt><dd class="mono ellipsis" id="site-path">&mdash;</dd>
           <dt>met</dt><dd id="known-peers">&mdash;</dd>
         </dl>
+      </div>
+    </section>
+
+    <section class="module" aria-labelledby="activity-heading">
+      <h2 class="module-head" id="activity-heading">
+        Activity <span class="module-meta" id="activity-meta"></span>
+      </h2>
+      <div class="module-body">
+        <dl class="facts">
+          <dt>you</dt><dd id="act-uptime">&mdash;</dd>
+          <dt>hub</dt><dd id="act-hub">&mdash;</dd>
+          <dt>round trip</dt><dd id="act-latency">&mdash;</dd>
+          <dt>speed</dt><dd id="act-speed">&mdash;</dd>
+          <dt>sent</dt><dd id="act-out">&mdash;</dd>
+          <dt>received</dt><dd id="act-in">&mdash;</dd>
+          <dt>last</dt><dd id="act-last">&mdash;</dd>
+        </dl>
+        <p class="aside-note">Measured on this node, from what it actually sent
+           and received. Every send updates it. Nobody else's numbers are here:
+           speed belongs to a pair of machines, not the neighborhood.</p>
+        <label class="toggle"><input type="checkbox" id="toggle-hidden">
+          <span>Hidden &mdash; stay off everyone's roster</span></label>
+        <p class="aside-note" id="hidden-note" hidden>You still see the
+           neighborhood. Anything you send is signed, so its recipient knows
+           it was you.</p>
+        <label class="toggle"><input type="checkbox" id="toggle-low-data">
+          <span>Low data &mdash; no pictures, no attachments</span></label>
+        <span id="mode-result" class="aside-note"></span>
       </div>
     </section>
 
@@ -88,6 +132,15 @@
       </div>
     </section>
 
+    <section class="module" aria-labelledby="contacts-heading">
+      <h2 class="module-head" id="contacts-heading">
+        Contacts <span class="module-meta" id="contacts-meta"></span>
+      </h2>
+      <div class="module-body">
+        <div id="contacts" class="stack"></div>
+      </div>
+    </section>
+
     <section class="module" aria-labelledby="channels-heading">
       <h2 class="module-head" id="channels-heading">
         Channels <span class="module-meta" id="channel-meta"></span>
@@ -100,6 +153,15 @@
             <input id="say-body" placeholder="say something" maxlength="800">
             <button type="submit">Send</button>
           </div>
+          <details class="attach" id="say-attach">
+            <summary>Attach a file</summary>
+            <div class="field-row">
+              <select id="say-file" aria-label="File from your shared folder"></select>
+              <label class="file-pick inline"><span>or share a new one</span>
+                <input type="file" id="say-upload"></label>
+            </div>
+            <p class="aside-note" id="say-cost"></p>
+          </details>
           <div class="field-row end">
             <span id="say-result" class="aside-note"></span>
           </div>
@@ -130,8 +192,14 @@
         <div class="field-row end">
           <span id="site-result" class="aside-note"></span>
           <button type="button" id="revert-site" class="quiet">Revert</button>
+          <button type="button" id="preview-site" class="quiet" aria-expanded="false">Preview</button>
           <button type="button" id="save-site">Save page</button>
         </div>
+        <!-- Shows the draft, not the saved page, so you can see a change
+             before neighbors do. Sandboxed without scripts: a page you are
+             still writing should not run inside your own dashboard. -->
+        <iframe id="site-preview" class="site-preview" title="Preview of your page"
+                sandbox="allow-same-origin" hidden></iframe>
         <div id="site-files" class="stack"></div>
         <label class="file-pick">
           <span>Add a picture or file</span>
@@ -158,10 +226,21 @@
       <div class="module-body">
         <form id="compose" autocomplete="off">
           <div class="field-row">
-            <input id="compose-to" name="to" placeholder="to: nickname or fingerprint" required>
+            <input id="compose-to" name="to" placeholder="to: nickname or fingerprint" required
+                   list="contact-suggestions" autocomplete="off">
+            <datalist id="contact-suggestions"></datalist>
             <input id="compose-subject" name="subject" placeholder="subject">
           </div>
           <textarea id="compose-body" name="body" rows="3" placeholder="write something"></textarea>
+          <details class="attach" id="compose-attach">
+            <summary>Attach a file</summary>
+            <div class="field-row">
+              <select id="compose-file" aria-label="File from your shared folder"></select>
+              <label class="file-pick inline"><span>or share a new one</span>
+                <input type="file" id="compose-upload"></label>
+            </div>
+            <p class="aside-note" id="compose-cost"></p>
+          </details>
           <div class="field-row end">
             <span id="compose-result" class="aside-note"></span>
             <button type="submit">Send</button>
