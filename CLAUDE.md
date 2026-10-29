@@ -176,6 +176,22 @@ key material independent.
     hidden is still signed. Starting hidden registers nothing; registering and
     withdrawing would flash you onto every roster.
 
+30. **A net is its log.** Every act in a net is a signed post in its
+    governance channel, and `net::fold` derives the state. Nothing about a net
+    is stored except those posts, so no node can hold a version the log does
+    not support. The fold must stay deterministic: same posts, same leader.
+31. **Order a log causally, not just by clock.** The founding charter folds
+    first; within one second a join precedes a motion precedes a vote; a vote
+    for a motion not yet reached is held until it opens. Clocks differ between
+    machines, and ordering by time alone lost joins and votes. (Real bug, two
+    named regression tests.)
+32. **A vote names its voters when it opens.** Nets are open and keys are
+    free, so eligibility is fixed in the motion and only current members can
+    be named. Keys minted after a vote opens count for nothing; keys minted
+    in advance still do, and the dashboard says so. Do not claim more.
+33. **A net id proves its founder.** It is derived from the founder's key and
+    a nonce, so a copied charter founds nothing.
+
 ## Conventions
 
 - Comments explain *why*, especially where a line encodes a security decision

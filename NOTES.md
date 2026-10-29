@@ -224,9 +224,28 @@ from the first release opens without the operator doing anything.
 * **Known Bugs/Gaps**:
   * Going hidden takes up to 30s for peers that also heard the beacon; there
     is no signed beacon goodbye.
-  * Nets / leaders / impeachment / vote-kick / mandatory low data: NOT BUILT.
-    Waiting on Ben's answer to the Sybil problem (identities are free, so any
-    plain majority vote is won by whoever mints the most keys).
+  * Nets were built after this: see the next update.
+<!-- MEMORY_UPDATE_END -->
+
+<!-- MEMORY_UPDATE_START -->
+### Update: 2026-10-29 (nets)
+* **Decisions/Changes**:
+  * Ben chose open nets, some with private channels. A net = signed event log
+    in a derived governance channel; `net::fold` gives members, leader,
+    policy, motions, announcements. Directory channel lists charters.
+  * Founder leads; on leave, longest-standing member leads. Impeach (any
+    member) / kick (leader calls it, members decide): strict majority of the
+    voters named when the motion opened; 24h lifetime. Impeach successor is
+    drawn at random, seeded by the carrying votes' signatures.
+  * Leader-only: mandatory low data (enforced on the node), announcements,
+    pings (one per 10 min). Kicked keys are banned from rejoining.
+  * Fixed a fold ordering bug (same-second join, slow-clock vote).
+* **Known Bugs/Gaps**:
+  * Sybil resistance is partial by design: pre-minted keys can still vote.
+  * Votes cap at 300 members (motion must fit in one post).
+  * Channel-level leaders were not built; leadership is per net.
+  * A kicked person can return under a fresh key; open nets cannot stop that.
+  * A kick does not re-key a net's private channels.
 <!-- MEMORY_UPDATE_END -->
 
 ## Open questions for Ben

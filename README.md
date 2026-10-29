@@ -307,6 +307,14 @@ dashboards, diagnostics, `serve`, `surf`, signed store-and-forward mail with
 attachments, channels both public and private, guestbooks, and resumable file
 transfer. Your page is written from the dashboard.
 
+**Nets** are open groups of channels anyone in range can find and join. The
+founder leads; members can impeach a leader (a new one is drawn at random) and
+the leader can call a vote to remove a member. A leader can make low data
+mandatory, announce, and ping everyone. There is no server holding any of
+this: a net is a log of signed posts, and every node works out the same
+answer from it. Votes count members who had joined when the vote opened; an
+open net cannot stop somebody who made many keys in advance.
+
 See `NOTES.md` for what is still undecided.
 
 ## License
