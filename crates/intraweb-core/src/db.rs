@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 pub struct Store {
     conn: Connection,
@@ -57,6 +57,7 @@ impl Store {
             (4, SCHEMA_V4),
             (5, SCHEMA_V5),
             (6, SCHEMA_V6),
+            (7, SCHEMA_V7),
         ] {
             if current >= version {
                 continue;
@@ -382,8 +383,9 @@ impl Store {
     pub fn store_post(&self, sealed: &SignedPost, body: &str, readable: bool) -> Result<bool> {
         let changed = self.conn.execute(
             "INSERT OR IGNORE INTO channel_posts
-                (channel_id, from_peer, body, readable, created_at, signature, envelope)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (channel_id, from_peer, body, readable, created_at, signature, envelope,
+                 attachment)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 sealed.post.channel.to_hex(),
                 sealed.post.from.to_hex(),
@@ -392,6 +394,7 @@ impl Store {
                 sealed.post.created_at as i64,
                 sealed.signature,
                 serde_json::to_string(sealed).unwrap_or_default(),
+                sealed.post.attachment,
             ],
         )?;
         Ok(changed > 0)
@@ -432,8 +435,8 @@ impl Store {
     /// Recent messages, oldest first so they read as a conversation.
     pub fn posts(&self, channel_id: ChannelId, limit: u32) -> Result<Vec<StoredPost>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, channel_id, from_peer, body, readable, created_at FROM (
-                 SELECT id, channel_id, from_peer, body, readable, created_at
+            "SELECT id, channel_id, from_peer, body, readable, created_at, attachment FROM (
+                 SELECT id, channel_id, from_peer, body, readable, created_at, attachment
                  FROM channel_posts WHERE channel_id = ?1
                  ORDER BY created_at DESC, id DESC LIMIT ?2
              ) ORDER BY created_at ASC, id ASC",
@@ -452,6 +455,7 @@ impl Store {
                 body: row.get(3)?,
                 readable: row.get::<_, i64>(4)? != 0,
                 created_at: row.get::<_, i64>(5)? as u64,
+                attachment: row.get(6)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -630,6 +634,8 @@ pub struct StoredPost {
     pub body: String,
     pub readable: bool,
     pub created_at: u64,
+    /// A file in the author's shared folder, fetched from them on demand.
+    pub attachment: Option<String>,
 }
 
 /// A channel this vault knows about.
@@ -709,6 +715,12 @@ CREATE INDEX IF NOT EXISTS idx_mail_pending
 /// Backfill has to serve exactly the bytes that were signed. The decoded body
 /// is not enough -- a private post is stored decrypted where we hold the key,
 /// and re-serializing risks differing by a byte and breaking the signature.
+/// The file a post offers, kept as a column so listing a channel does not
+/// have to parse every envelope. Covered by the signature in the envelope.
+const SCHEMA_V7: &str = r#"
+ALTER TABLE channel_posts ADD COLUMN attachment TEXT;
+"#;
+
 const SCHEMA_V6: &str = r#"
 ALTER TABLE channel_posts ADD COLUMN envelope TEXT;
 "#;
@@ -1059,6 +1071,36 @@ mod tests {
         assert_eq!(store.newest_post_at(channel).unwrap(), 300);
         assert_eq!(store.envelopes_since(channel, 200, 10).unwrap().len(), 2);
         assert_eq!(store.envelopes_since(channel, 400, 10).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_post_offering_a_file_is_listed_with_it() {
+        let store = Store::open_in_memory().unwrap();
+        let channel = ChannelId::neighborhood();
+        let alice = Identity::generate().unwrap();
+
+        let sealed = SignedPost::seal(
+            crate::channel::Post::public(channel, alice.peer_id(), "the bench")
+                .with_attachment(Some("photos/bench.jpg")),
+            &alice,
+        )
+        .unwrap();
+        store.store_post(&sealed, "the bench", true).unwrap();
+        store
+            .store_post(&post_from(&alice, channel, "no file"), "no file", true)
+            .unwrap();
+
+        let attachments: Vec<Option<String>> = store
+            .posts(channel, 10)
+            .unwrap()
+            .into_iter()
+            .map(|post| post.attachment)
+            .collect();
+        assert!(attachments.contains(&Some("photos/bench.jpg".to_string())));
+        assert!(
+            attachments.contains(&None),
+            "a post without one stays without one"
+        );
     }
 
     #[test]

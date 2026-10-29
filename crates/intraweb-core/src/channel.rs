@@ -16,7 +16,10 @@ use base64::engine::general_purpose::STANDARD_NO_PAD as B64;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const POST_VERSION: u16 = 1;
+pub const POST_VERSION: u16 = 2;
+
+/// Longest attachment path a post will carry, matching mail's.
+pub const MAX_ATTACHMENT_PATH: usize = 200;
 pub const MAX_POST_BYTES: usize = 8 * 1024;
 /// Channel names are shown in lists and typed at the command line.
 pub const MAX_CHANNEL_NAME: usize = 40;
@@ -111,6 +114,17 @@ pub struct Post {
     pub nonce: String,
     pub body: String,
     pub encrypted: bool,
+    /// A file in the sender's shared folder, offered rather than enclosed.
+    ///
+    /// The same bargain mail strikes: the bytes stay put until somebody asks
+    /// for them. It matters more here, because a post goes to everyone in
+    /// range -- enclosing a picture would push it at every neighbor whether
+    /// they wanted it or not, and a channel is not a mailing list.
+    ///
+    /// The path is covered by the signature, so a post cannot be repointed at
+    /// another file after it is signed.
+    #[serde(default)]
+    pub attachment: Option<String>,
 }
 
 impl Post {
@@ -124,7 +138,16 @@ impl Post {
             nonce: String::new(),
             body: body.to_string(),
             encrypted: false,
+            attachment: None,
         }
+    }
+
+    /// The same post, offering a file from the sender's shared folder.
+    pub fn with_attachment(mut self, path: Option<&str>) -> Self {
+        self.attachment = path
+            .map(|path| path.trim().trim_start_matches('/').to_string())
+            .filter(|path| !path.is_empty());
+        self
     }
 
     /// A message only channel members can read.
@@ -144,6 +167,7 @@ impl Post {
             nonce,
             body: ciphertext,
             encrypted: true,
+            attachment: None,
         })
     }
 
@@ -159,7 +183,7 @@ impl Post {
     /// base64'd so a message containing the separator cannot forge fields.
     pub fn signing_bytes(&self) -> Vec<u8> {
         format!(
-            "{SIGNING_DOMAIN}|{}|{}|{}|{}|{}|{}|{}",
+            "{SIGNING_DOMAIN}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.version,
             self.channel.to_hex(),
             self.from.to_hex(),
@@ -167,6 +191,7 @@ impl Post {
             u8::from(self.encrypted),
             B64.encode(self.nonce.as_bytes()),
             B64.encode(self.body.as_bytes()),
+            B64.encode(self.attachment.as_deref().unwrap_or_default().as_bytes()),
         )
         .into_bytes()
     }
@@ -176,6 +201,29 @@ impl Post {
             self.body.len() <= MAX_POST_BYTES * 2,
             "that message is too long"
         );
+        if let Some(attachment) = &self.attachment {
+            // The shared folder is public: anyone in range can list it and
+            // fetch from it. A file offered in a private channel would be
+            // readable by the whole network all the same, so carrying one
+            // there would be a promise the wire does not keep.
+            ensure!(
+                !self.encrypted,
+                "a private channel cannot carry attachments, because the shared \
+                 folder they live in is public",
+            );
+            ensure!(
+                attachment.len() <= MAX_ATTACHMENT_PATH,
+                "attachment path is too long",
+            );
+            // The path is handed to the sender's own file service, so it must
+            // not be able to climb out of the shared folder.
+            ensure!(
+                !attachment
+                    .split('/')
+                    .any(|part| part == ".." || part.is_empty()),
+                "attachment path must stay inside the shared folder",
+            );
+        }
         Ok(())
     }
 
@@ -435,6 +483,105 @@ mod tests {
 
         sealed.post.channel = ChannelId::neighborhood();
         assert!(sealed.accept().is_err());
+    }
+
+    #[test]
+    fn an_attachment_survives_the_round_trip() {
+        let alice = Identity::generate().unwrap();
+        let sealed = SignedPost::seal(
+            Post::public(ChannelId::neighborhood(), alice.peer_id(), "the bench")
+                .with_attachment(Some("photos/bench.jpg")),
+            &alice,
+        )
+        .unwrap();
+
+        let travelled: SignedPost =
+            serde_json::from_str(&serde_json::to_string(&sealed).unwrap()).unwrap();
+        assert!(travelled.accept().is_ok());
+        assert_eq!(
+            travelled.post.attachment.as_deref(),
+            Some("photos/bench.jpg")
+        );
+    }
+
+    /// The whole point of signing the path: otherwise anyone relaying the post
+    /// could leave the words alone and swap what they point at.
+    #[test]
+    fn repointing_an_attachment_breaks_the_signature() {
+        let alice = Identity::generate().unwrap();
+        let mut sealed = SignedPost::seal(
+            Post::public(ChannelId::neighborhood(), alice.peer_id(), "the bench")
+                .with_attachment(Some("photos/bench.jpg")),
+            &alice,
+        )
+        .unwrap();
+
+        sealed.post.attachment = Some("photos/receipts.pdf".into());
+        assert!(sealed.accept().is_err());
+    }
+
+    #[test]
+    fn adding_an_attachment_to_a_bare_post_breaks_the_signature() {
+        let alice = Identity::generate().unwrap();
+        let mut sealed = SignedPost::seal(
+            Post::public(
+                ChannelId::neighborhood(),
+                alice.peer_id(),
+                "nothing attached",
+            ),
+            &alice,
+        )
+        .unwrap();
+
+        sealed.post.attachment = Some("photos/bench.jpg".into());
+        assert!(sealed.accept().is_err());
+    }
+
+    /// Built as a hostile node would send it, with the field set directly --
+    /// a post off the wire never passes through `with_attachment`.
+    #[test]
+    fn an_attachment_off_the_wire_cannot_climb_out_of_the_shared_folder() {
+        let alice = Identity::generate().unwrap();
+        for hostile in [
+            "../identity.key",
+            "photos/../../identity.key",
+            "/etc/passwd",
+            "//etc/passwd",
+            "photos//bench.jpg",
+        ] {
+            let mut post = Post::public(ChannelId::neighborhood(), alice.peer_id(), "look");
+            post.attachment = Some(hostile.into());
+            assert!(
+                post.check_limits().is_err(),
+                "{hostile} must not be attachable"
+            );
+        }
+    }
+
+    /// The file would sit in the public shared folder, so a private channel
+    /// offering it would be a promise the wire does not keep.
+    #[test]
+    fn a_private_post_cannot_carry_an_attachment() {
+        let alice = Identity::generate().unwrap();
+        let key = [7u8; 32];
+        let mut post = Post::private(
+            ChannelId::new_private().unwrap(),
+            alice.peer_id(),
+            &key,
+            "secret",
+        )
+        .unwrap();
+        post.attachment = Some("photos/plans.jpg".into());
+        assert!(post.check_limits().is_err());
+    }
+
+    #[test]
+    fn a_leading_slash_typed_locally_is_read_as_inside_the_shared_folder() {
+        let alice = Identity::generate().unwrap();
+        let post = Post::public(ChannelId::neighborhood(), alice.peer_id(), "look")
+            .with_attachment(Some("/photos/bench.jpg"));
+        assert_eq!(post.attachment.as_deref(), Some("photos/bench.jpg"));
+        assert!(post.check_limits().is_ok());
     }
 
     #[test]
