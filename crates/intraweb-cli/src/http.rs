@@ -88,9 +88,27 @@ pub async fn request(
         anyhow::Ok(buf)
     };
 
-    let raw = tokio::time::timeout(timeout, exchange)
-        .await
-        .map_err(|_| anyhow::anyhow!("{} did not answer in time", host_for(addr)))??;
+    let started = std::time::Instant::now();
+    let raw = match tokio::time::timeout(timeout, exchange).await {
+        Ok(Ok(raw)) => raw,
+        Ok(Err(err)) => {
+            crate::traffic::record_failure();
+            return Err(err);
+        }
+        Err(_) => {
+            crate::traffic::record_failure();
+            anyhow::bail!("{} did not answer in time", host_for(addr));
+        }
+    };
+    // The head is a few hundred bytes; counting the body we sent and the
+    // whole reply is close enough and costs nothing to work out.
+    let sent = body.map_or(0, str::len) as u64;
+    crate::traffic::record(
+        crate::traffic::Direction::Out,
+        sent,
+        raw.len() as u64,
+        started.elapsed(),
+    );
 
     parse_response(&raw)
 }
@@ -196,6 +214,8 @@ pub async fn stream_to_file(
         .with_context(|| format!("could not write {}", destination.display()))?;
 
     let mut written = if resuming { already } else { 0 };
+    let started = std::time::Instant::now();
+    let starting_from = written;
     let mut chunk = vec![0u8; 64 * 1024];
     loop {
         let read = stream.read(&mut chunk).await?;
@@ -207,6 +227,14 @@ pub async fn stream_to_file(
         on_progress(written, expected);
     }
     file.flush().await?;
+    // Only what crossed the wire this time; a resumed transfer's earlier part
+    // was measured when it happened.
+    crate::traffic::record(
+        crate::traffic::Direction::Out,
+        0,
+        written - starting_from,
+        started.elapsed(),
+    );
     Ok(written)
 }
 

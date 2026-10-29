@@ -100,6 +100,26 @@ pub fn queue(
 ///
 /// Anything whose recipient is not currently in range is simply left alone;
 /// there is nothing to report and nothing to retry against.
+/// The message as it was written, from its row in the outbox.
+///
+/// Every field has to come back. The attachment once did not: delivery
+/// rebuilt the message from subject and body alone, so a file offered through
+/// the outbox arrived without it and nobody was told. (Real bug, named
+/// regression test.)
+fn rebuild(from: PeerId, queued: &intraweb_core::db::StoredMail) -> Mail {
+    let mail = Mail::new(
+        from,
+        queued.peer_id,
+        &queued.subject,
+        &queued.body,
+        queued.created_at,
+    );
+    match queued.attachment.as_deref() {
+        Some(path) => mail.with_attachment(path),
+        None => mail,
+    }
+}
+
 pub async fn deliver_pending(
     store: &Arc<Mutex<Store>>,
     roster: &Roster,
@@ -120,13 +140,7 @@ pub async fn deliver_pending(
         let Some(peer) = peers.iter().find(|p| p.peer_id == queued.peer_id) else {
             continue; // Not in range. Wait.
         };
-        let mail = Mail::new(
-            identity.peer_id(),
-            queued.peer_id,
-            &queued.subject,
-            &queued.body,
-            queued.created_at,
-        );
+        let mail = rebuild(identity.peer_id(), &queued);
         let Ok(sealed) = SignedMail::seal(mail, identity) else {
             continue;
         };
@@ -267,6 +281,29 @@ mod tests {
     use super::*;
     use intraweb_core::peer::{DiscoverySource, TrustState};
     use std::net::{IpAddr, Ipv4Addr};
+
+    /// Regression: delivery rebuilt queued mail from subject and body alone,
+    /// so an attachment offered through the outbox arrived without it.
+    #[test]
+    fn queued_mail_keeps_its_attachment_on_the_way_out() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let alice = Identity::generate().unwrap();
+        let bob = Identity::generate().unwrap();
+        queue(
+            &store,
+            alice.peer_id(),
+            bob.peer_id(),
+            "the bench",
+            "photo attached",
+            Some("bench.jpg"),
+        )
+        .unwrap();
+
+        let pending = store.lock().unwrap().pending_outgoing().unwrap();
+        let outgoing = rebuild(alice.peer_id(), &pending[0]);
+        assert_eq!(outgoing.attachment.as_deref(), Some("bench.jpg"));
+        assert_eq!(outgoing.subject, "the bench");
+    }
 
     fn peer_named(nickname: &str) -> Peer {
         let peer_id = Identity::generate().unwrap().peer_id();

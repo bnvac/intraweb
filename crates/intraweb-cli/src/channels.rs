@@ -40,6 +40,21 @@ pub async fn say_to(
     channel: ChannelId,
     body: &str,
 ) -> Result<Delivery> {
+    say_offering(store, identity, peers, channel, body, None).await
+}
+
+/// Say something, optionally offering a file from our shared folder.
+///
+/// The one place a post is built, so whatever rules a post must satisfy are
+/// checked here for every caller.
+pub async fn say_offering(
+    store: &Arc<Mutex<Store>>,
+    identity: &Identity,
+    peers: &[Peer],
+    channel: ChannelId,
+    body: &str,
+    attachment: Option<&str>,
+) -> Result<Delivery> {
     let (channel_key, members, is_known_public) = {
         let store = store
             .lock()
@@ -66,9 +81,17 @@ pub async fn say_to(
                 channel.is_neighborhood() || is_known_public,
                 "you do not hold that channel's key, so you cannot post to it",
             );
-            Post::public(channel, identity.peer_id(), body)
+            Post::public(channel, identity.peer_id(), body).with_attachment(attachment)
         }
     };
+    // Refused here, before signing, with the reason: the private constructor
+    // takes no attachment, so without this one would vanish silently.
+    anyhow::ensure!(
+        !(is_private && attachment.is_some()),
+        "a private channel cannot carry attachments, because the shared folder \
+         they live in is public",
+    );
+    post.check_limits()?;
     let sealed = SignedPost::seal(post, identity)?;
 
     // Keep our own copy first: what we said should appear whether or not
@@ -114,8 +137,9 @@ pub async fn say(
     roster: &Roster,
     channel: ChannelId,
     body: &str,
+    attachment: Option<&str>,
 ) -> Result<Delivery> {
-    say_to(store, identity, &roster.peers(), channel, body).await
+    say_offering(store, identity, &roster.peers(), channel, body, attachment).await
 }
 
 async fn deliver_post(peer: &Peer, sealed: &SignedPost) -> Result<()> {

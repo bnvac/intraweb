@@ -7,7 +7,10 @@ mod http;
 mod limits;
 mod mail;
 mod surf;
+mod traffic;
 mod tui;
+
+use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -205,6 +208,11 @@ struct UpArgs {
     #[arg(long)]
     no_beacon: bool,
 
+    /// Listen without announcing: see the neighborhood without appearing on
+    /// anyone's roster. Toggle it later from the dashboard.
+    #[arg(long)]
+    anonymous: bool,
+
     /// Publish this folder instead of the vault's own site/ directory.
     #[arg(long, value_name = "DIR")]
     site: Option<PathBuf>,
@@ -231,6 +239,7 @@ async fn run() -> Result<()> {
         port: None,
         tui: false,
         no_beacon: false,
+        anonymous: false,
         site: None,
     })) {
         Command::Up(args) => up(vault, args).await,
@@ -292,6 +301,9 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
     }
     if args.no_beacon {
         config.beacon_enabled = false;
+    }
+    if args.anonymous {
+        config.anonymous = true;
     }
 
     // A served folder is published in place; nothing is copied into the vault,
@@ -368,6 +380,7 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
         started_at: now_secs(),
         limiter: Arc::new(limits::RateLimiter::new(limits::now_float())),
         node: Some(Arc::clone(&node)),
+        low_data: Arc::new(std::sync::atomic::AtomicBool::new(config.low_data)),
     };
 
     // A hub tries port 80 so newcomers can type a bare hostname -- unless a
@@ -394,7 +407,11 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
             Arc::clone(&config),
         );
         let server = tokio::spawn(async move {
-            let _ = axum::serve(listener, api::router(state)).await;
+            let _ = axum::serve(
+                listener,
+                api::router(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
         });
         // The terminal loop blocks, so it gets a thread of its own.
         tokio::task::spawn_blocking(move || dashboard.run()).await??;
@@ -418,7 +435,10 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
         }
         println!("\nListening for neighbors. Ctrl-C to stop.\n");
 
-        let server = axum::serve(listener, api::router(state));
+        let server = axum::serve(
+            listener,
+            api::router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        );
         tokio::select! {
             result = server => result.context("the dashboard stopped unexpectedly")?,
             _ = stop_requested() => println!("\nLeaving the neighborhood."),

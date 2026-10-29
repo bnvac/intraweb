@@ -181,7 +181,7 @@ impl Store {
     /// live roster.
     pub fn known_peers(&self, limit: u32) -> Result<Vec<KnownPeer>> {
         let mut stmt = self.conn.prepare(
-            "SELECT peer_id, nickname, verified FROM known_peers
+            "SELECT peer_id, nickname, verified, last_seen FROM known_peers
              ORDER BY last_seen DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit], |row| {
@@ -190,6 +190,7 @@ impl Store {
                 peer_id: PeerId::parse_hex(&hex).unwrap_or_else(|| PeerId::from_bytes([0u8; 32])),
                 nickname: row.get(1)?,
                 verified: row.get::<_, i64>(2)? != 0,
+                last_seen: row.get::<_, i64>(3)? as u64,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -644,6 +645,9 @@ pub struct KnownPeer {
     pub peer_id: PeerId,
     pub nickname: String,
     pub verified: bool,
+    /// When we last saw them, roughly: sightings are written through on a
+    /// throttle, so this can trail the roster by up to a minute.
+    pub last_seen: u64,
 }
 
 /// A message as stored locally.
@@ -707,6 +711,12 @@ CREATE INDEX IF NOT EXISTS idx_mail_pending
     ON mail (direction, delivered_at) WHERE delivered_at IS NULL;
 "#;
 
+/// The file a post offers, kept as a column so listing a channel does not
+/// have to parse every envelope. Covered by the signature in the envelope.
+const SCHEMA_V7: &str = r#"
+ALTER TABLE channel_posts ADD COLUMN attachment TEXT;
+"#;
+
 /// v3: fingerprints stored for lookalike detection, and a blocklist.
 /// v5: an attachment is a file in the sender's shared folder, named here.
 /// The bytes are never copied into the message.
@@ -715,12 +725,6 @@ CREATE INDEX IF NOT EXISTS idx_mail_pending
 /// Backfill has to serve exactly the bytes that were signed. The decoded body
 /// is not enough -- a private post is stored decrypted where we hold the key,
 /// and re-serializing risks differing by a byte and breaking the signature.
-/// The file a post offers, kept as a column so listing a channel does not
-/// have to parse every envelope. Covered by the signature in the envelope.
-const SCHEMA_V7: &str = r#"
-ALTER TABLE channel_posts ADD COLUMN attachment TEXT;
-"#;
-
 const SCHEMA_V6: &str = r#"
 ALTER TABLE channel_posts ADD COLUMN envelope TEXT;
 "#;

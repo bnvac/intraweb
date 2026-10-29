@@ -168,6 +168,18 @@ impl MdnsNode {
         Ok(())
     }
 
+    /// Stop announcing, saying goodbye so neighbors drop us now rather than
+    /// when our record expires. Browsing carries on.
+    pub fn withdraw(&self) {
+        let fullname = self.fullname.lock().ok().and_then(|mut held| held.take());
+        if let Some(fullname) = fullname
+            && let Ok(acknowledged) = self.daemon.unregister(&fullname)
+        {
+            // As at shutdown: the acknowledgement follows the packet.
+            let _ = acknowledged.recv_timeout(GOODBYE_GRACE);
+        }
+    }
+
     /// Browse without announcing.
     ///
     /// Looking around should not change what the network sees. It also avoids

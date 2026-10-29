@@ -50,6 +50,8 @@ pub struct AppState {
     /// The running node, so a rename can be announced without a restart.
     /// `None` for commands that serve nothing.
     pub node: Option<Arc<intraweb_net::Node>>,
+    /// Shared so a toggle applies to the next request, not the next restart.
+    pub low_data: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Serialize)]
@@ -71,6 +73,9 @@ struct Status {
     vault_path: String,
     site_path: String,
     uptime_secs: u64,
+    /// Listening without announcing; nobody's roster shows us.
+    hidden: bool,
+    low_data: bool,
     now: u64,
 }
 
@@ -107,6 +112,8 @@ fn status_of(state: &AppState) -> Status {
         vault_path: state.vault.root().display().to_string(),
         site_path: state.site_dir.display().to_string(),
         uptime_secs: now_secs().saturating_sub(state.started_at),
+        hidden: state.node.as_ref().is_some_and(|node| node.is_hidden()),
+        low_data: is_low_data(state),
         now: now_secs(),
     }
 }
@@ -305,6 +312,72 @@ struct Compose {
     subject: String,
     #[serde(default)]
     body: String,
+    /// A file in our shared folder to offer with the message.
+    #[serde(default)]
+    attachment: Option<String>,
+}
+
+fn is_low_data(state: &AppState) -> bool {
+    state.low_data.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Check a file we are about to offer: that low data mode allows offering
+/// anything, and that the file is really ours to offer.
+///
+/// Shared by mail and posts, so the two cannot drift into different rules.
+/// Offering a file we do not have would hand the recipient a dead link.
+fn check_offer(state: &AppState, path: Option<&str>) -> Result<(), (StatusCode, String)> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if is_low_data(state) {
+        return Err((
+            StatusCode::CONFLICT,
+            "low data mode is on, so attachments are off; turn it off to offer files".into(),
+        ));
+    }
+    let files = state.vault.files_dir();
+    let on_disk = files.join(path.trim_start_matches('/'));
+    if !crate::guard::resolves_within(&files, path) || !on_disk.is_file() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("{path} is not in your shared files folder; add it there first"),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct LowDataBody {
+    low_data: bool,
+}
+
+async fn set_low_data(State(state): State<AppState>, body: String) -> impl IntoResponse {
+    let Ok(wanted) = serde_json::from_str::<LowDataBody>(&body) else {
+        return (StatusCode::BAD_REQUEST, "could not read that").into_response();
+    };
+    state
+        .low_data
+        .store(wanted.low_data, std::sync::atomic::Ordering::Relaxed);
+
+    let path = state.vault.config_path();
+    let saved = Config::load_or_create(&path).and_then(|mut config| {
+        config.low_data = wanted.low_data;
+        config.save(&path)
+    });
+    let note = if wanted.low_data {
+        "Low data mode on: pictures wait to be asked for, and nothing is attached."
+    } else {
+        "Low data mode off."
+    };
+    match saved {
+        Ok(()) => (StatusCode::OK, note.to_string()).into_response(),
+        Err(err) => (
+            StatusCode::OK,
+            format!("{note} (Not saved for next time: {err:#})"),
+        )
+            .into_response(),
+    }
 }
 
 /// Queue a message written in the dashboard.
@@ -315,6 +388,15 @@ async fn send_mail(State(state): State<AppState>, body: String) -> impl IntoResp
     let Ok(compose) = serde_json::from_str::<Compose>(&body) else {
         return (StatusCode::BAD_REQUEST, "could not read that form").into_response();
     };
+
+    let attachment = compose
+        .attachment
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
+    if let Err(refused) = check_offer(&state, attachment) {
+        return refused.into_response();
+    }
 
     let peers = crate::mail::addressable(&state.roster.peers(), &state.store);
     let recipient = match crate::mail::resolve_or_explain(&peers, &compose.to) {
@@ -328,7 +410,7 @@ async fn send_mail(State(state): State<AppState>, body: String) -> impl IntoResp
         recipient.peer_id,
         &compose.subject,
         &compose.body,
-        None,
+        attachment,
     ) {
         Ok(_) => (
             StatusCode::OK,
@@ -370,6 +452,106 @@ async fn mark_all_read(State(state): State<AppState>) -> impl IntoResponse {
         Ok(count) => (StatusCode::OK, count.to_string()).into_response(),
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct HiddenBody {
+    hidden: bool,
+}
+
+/// Go quiet or come back. Saved to the config as well, so a restart does not
+/// silently put somebody who chose to be hidden back on every roster.
+async fn set_hidden(State(state): State<AppState>, body: String) -> impl IntoResponse {
+    let Ok(wanted) = serde_json::from_str::<HiddenBody>(&body) else {
+        return (StatusCode::BAD_REQUEST, "could not read that").into_response();
+    };
+    let Some(node) = state.node.as_ref() else {
+        return (StatusCode::CONFLICT, "this command is not on the network").into_response();
+    };
+    if let Err(err) = node.set_hidden(wanted.hidden) {
+        return (StatusCode::CONFLICT, format!("{err:#}")).into_response();
+    }
+
+    let path = state.vault.config_path();
+    let saved = Config::load_or_create(&path).and_then(|mut config| {
+        config.anonymous = wanted.hidden;
+        config.save(&path)
+    });
+    let note = if wanted.hidden {
+        "Hidden. You are off every roster; what you send is still signed as you."
+    } else {
+        "Visible again. Neighbors will see you within a few seconds."
+    };
+    match saved {
+        Ok(()) => (StatusCode::OK, note.to_string()).into_response(),
+        Err(err) => (
+            StatusCode::OK,
+            format!("{note} (Not saved for next time: {err:#})"),
+        )
+            .into_response(),
+    }
+}
+
+/// Somebody whose key is in the keyring, and whether they are in range now.
+#[derive(Serialize)]
+struct Contact {
+    peer_id: String,
+    /// Always shown beside the name: a contact list is exactly where a
+    /// lookalike would hope to pass as somebody familiar.
+    fingerprint: String,
+    nickname: String,
+    verified: bool,
+    online: bool,
+    /// Live from the roster when online, otherwise the keyring's last record.
+    last_seen: u64,
+    /// Present only while they are in range: an address we have not heard
+    /// recently is a guess, and a dead link is worse than none.
+    address: Option<String>,
+}
+
+/// Everyone met before, the ones in range first.
+///
+/// Serves the mail form's suggestions and the contacts list alike. A blocked
+/// key is left out: suggesting someone you chose to stop hearing from would
+/// undo the choice.
+async fn contacts(State(state): State<AppState>) -> impl IntoResponse {
+    let (known, blocked) = {
+        let Ok(store) = state.store.lock() else {
+            return (StatusCode::SERVICE_UNAVAILABLE, "the store is busy").into_response();
+        };
+        (
+            store.known_peers(500).unwrap_or_default(),
+            store.blocked_peers().unwrap_or_default(),
+        )
+    };
+    let live = state.roster.peers();
+
+    let mut list: Vec<Contact> = known
+        .into_iter()
+        .filter(|person| !blocked.contains(&person.peer_id))
+        .map(|person| {
+            let here = live.iter().find(|peer| peer.peer_id == person.peer_id);
+            Contact {
+                peer_id: person.peer_id.to_hex(),
+                fingerprint: person.peer_id.fingerprint(),
+                // The name they announce now beats the one we filed.
+                nickname: here.map_or(person.nickname, |peer| peer.nickname.clone()),
+                verified: person.verified,
+                online: here.is_some(),
+                last_seen: here.map_or(person.last_seen, |peer| peer.last_seen),
+                address: here.and_then(|peer| {
+                    peer.preferred_addr()
+                        .map(|addr| SocketAddr::new(addr, peer.api_port).to_string())
+                }),
+            }
+        })
+        .collect();
+    list.sort_by(|a, b| {
+        b.online
+            .cmp(&a.online)
+            .then_with(|| a.nickname.to_lowercase().cmp(&b.nickname.to_lowercase()))
+    });
+    axum::Json(list).into_response()
 }
 
 /// The page this node publishes, and whatever sits beside it.
@@ -470,7 +652,7 @@ async fn get_site(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn put_site(State(state): State<AppState>, body: String) -> impl IntoResponse {
     write_site_file(
-        &state,
+        &state.site_dir,
         SITE_INDEX,
         body.as_bytes(),
         "Saved. Your page is live.",
@@ -490,7 +672,96 @@ async fn put_site_file(
             .into_response();
     };
     let message = format!("Uploaded {name}.");
-    write_site_file(&state, &name, &body, &message)
+    write_site_file(&state.site_dir, &name, &body, &message)
+}
+
+/// Put a file in the shared folder, where posts and mail can offer it.
+async fn put_shared_file(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let Some(name) = safe_site_name(&name) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "that filename cannot be used; plain names only, no folders",
+        )
+            .into_response();
+    };
+    let message = format!("Shared {name}.");
+    write_site_file(&state.vault.files_dir(), &name, &body, &message)
+}
+
+/// The largest picture we will publish as ourselves.
+///
+/// Every neighbor who renders our card fetches it, so it is kept small: a
+/// profile picture is a thumbnail, and a slow one makes everybody's roster
+/// wait.
+const MAX_AVATAR_BYTES: usize = 512 * 1024;
+
+/// What a profile picture really is, judged by its first bytes and never by
+/// the name or the declared type, both of which the sender chooses.
+///
+/// SVG is deliberately absent. It is a document that can carry script, and it
+/// would be served from this dashboard's own origin -- where a script can do
+/// anything the operator can.
+fn avatar_kind(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+async fn put_avatar(State(state): State<AppState>, body: axum::body::Bytes) -> impl IntoResponse {
+    if body.len() > MAX_AVATAR_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "that picture is over {}KB; every neighbor downloads it, so shrink it first",
+                MAX_AVATAR_BYTES / 1024
+            ),
+        )
+            .into_response();
+    }
+    let Some(kind) = avatar_kind(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "that is not a PNG, JPEG, GIF or WebP picture",
+        )
+            .into_response();
+    };
+
+    // Clear the old one first: whichever extension is found first wins, so a
+    // stale avatar.png would otherwise shadow a new avatar.jpg.
+    remove_avatars(&state);
+    let name = format!("avatar.{kind}");
+    write_site_file(
+        state.vault.root(),
+        &name,
+        &body,
+        "Picture updated. Neighbors see it next time they look.",
+    )
+}
+
+async fn delete_avatar(State(state): State<AppState>) -> impl IntoResponse {
+    remove_avatars(&state);
+    (StatusCode::OK, "Back to the picture drawn from your key.").into_response()
+}
+
+fn remove_avatars(state: &AppState) {
+    while let Some(old) = state.vault.avatar_path() {
+        // Anything that will not go is left rather than looped on.
+        if std::fs::remove_file(&old).is_err() {
+            break;
+        }
+    }
 }
 
 /// The one path from the dashboard to the published folder.
@@ -498,7 +769,7 @@ async fn put_site_file(
 /// Shared so the size cap and the symlink refusal cannot be in force on one
 /// route and forgotten on the next.
 fn write_site_file(
-    state: &AppState,
+    dir: &std::path::Path,
     name: &str,
     body: &[u8],
     message: &str,
@@ -507,15 +778,14 @@ fn write_site_file(
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             format!(
-                "that is larger than the {}MB this will write; put big files in the vault's \
-                 files/ folder, which is served straight off disk",
+                "that is larger than the {}MB the dashboard will upload; copy big files \
+                 into the vault's files/ folder directly, which is served straight off disk",
                 MAX_SITE_WRITE / (1024 * 1024)
             ),
         )
             .into_response();
     }
 
-    let dir = &state.site_dir;
     if let Err(err) = std::fs::create_dir_all(dir) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -621,6 +891,43 @@ fn walk_files(root: &std::path::Path) -> Vec<SharedFile> {
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out
+}
+
+/// Count what neighbors send us and what we send back.
+///
+/// The operator's own dashboard is left out: it polls every couple of seconds
+/// over loopback, and counting that would bury the real traffic.
+async fn count_neighbor_traffic(request: Request, next: Next) -> axum::response::Response {
+    let from = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip());
+    if !from.is_some_and(crate::traffic::is_neighbor) {
+        return next.run(request).await;
+    }
+
+    let received = content_length(request.headers());
+    let started = std::time::Instant::now();
+    let response = next.run(request).await;
+    crate::traffic::record(
+        crate::traffic::Direction::In,
+        content_length(response.headers()),
+        received,
+        started.elapsed(),
+    );
+    response
+}
+
+fn content_length(headers: &axum::http::HeaderMap) -> u64 {
+    headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+}
+
+async fn activity() -> impl IntoResponse {
+    axum::Json(crate::traffic::snapshot())
 }
 
 /// Refuse writes driven by another website.
@@ -1077,6 +1384,9 @@ async fn channel_posts(
 #[derive(serde::Deserialize)]
 struct SayBody {
     body: String,
+    /// A file in our shared folder to offer with the post.
+    #[serde(default)]
+    attachment: Option<String>,
 }
 
 async fn say_in_channel(
@@ -1090,8 +1400,16 @@ async fn say_in_channel(
     let Ok(said) = serde_json::from_str::<SayBody>(&body) else {
         return (StatusCode::BAD_REQUEST, "could not read that").into_response();
     };
-    if said.body.trim().is_empty() {
+    let attachment = said
+        .attachment
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
+    if said.body.trim().is_empty() && attachment.is_none() {
         return (StatusCode::BAD_REQUEST, "nothing to say").into_response();
+    }
+    if let Err(refused) = check_offer(&state, attachment) {
+        return refused.into_response();
     }
 
     match crate::channels::say(
@@ -1100,6 +1418,7 @@ async fn say_in_channel(
         &state.roster,
         channel,
         &said.body,
+        attachment,
     )
     .await
     {
@@ -1193,6 +1512,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/guestbook", get(read_guestbook))
         .route("/api/guestbook/{peer}", post(sign_guestbook))
         .route("/api/files", get(shared_files))
+        .route("/api/contacts", get(contacts))
+        .route("/api/hidden", post(set_hidden))
+        .route("/api/activity", get(activity))
+        .route("/api/low-data", post(set_low_data))
+        .route("/api/files/{name}", post(put_shared_file))
+        .route("/api/avatar", post(put_avatar).delete(delete_avatar))
         .route("/api/site", get(get_site).post(put_site))
         .route(
             "/api/site/file/{name}",
@@ -1222,6 +1547,7 @@ pub fn router(state: AppState) -> Router {
         .nest_service(&format!("/~{nickname}"), site)
         .nest_service("/files", files)
         .layer(middleware::from_fn(refuse_cross_site_writes))
+        .layer(middleware::from_fn(count_neighbor_traffic))
 }
 
 /// Whether to try the clean, port-free URL.

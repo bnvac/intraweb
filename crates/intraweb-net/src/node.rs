@@ -12,6 +12,7 @@ use crate::registry::{PeerRegistry, Sighting};
 use anyhow::{Context, Result};
 use intraweb_core::peer::{DiscoverySource, Peer, now_secs};
 use intraweb_core::{Config, Identity, Store};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -84,6 +85,12 @@ pub struct Node {
     api_port: u16,
     hub: bool,
     hub_name: String,
+    /// Listening without announcing. Shared with the beacon and refresh loops,
+    /// which check it every tick, so going quiet takes effect at once and
+    /// coming back needs no restart.
+    hidden: Arc<AtomicBool>,
+    /// False for an observer, which never announces whatever is asked of it.
+    can_announce: bool,
 }
 
 impl Node {
@@ -94,6 +101,46 @@ impl Node {
         store: Arc<Mutex<Store>>,
     ) -> Result<Self> {
         Self::spawn(config, identity, store, true)
+    }
+
+    /// Whether we are currently staying off everyone's roster.
+    pub fn is_hidden(&self) -> bool {
+        self.hidden.load(Ordering::Relaxed)
+    }
+
+    /// Go quiet, or come back, without a restart.
+    ///
+    /// Going quiet says goodbye over mDNS so neighbors drop us now; the beacon
+    /// simply stops, and peers that only heard the beacon let us go at their
+    /// next sweep. Coming back registers afresh with a new timestamp.
+    pub fn set_hidden(&self, hidden: bool) -> Result<()> {
+        anyhow::ensure!(
+            self.can_announce,
+            "this node only looks around; it never announces"
+        );
+        let was = self.hidden.swap(hidden, Ordering::Relaxed);
+        if was == hidden {
+            return Ok(());
+        }
+        if hidden {
+            self.mdns.withdraw();
+            Ok(())
+        } else {
+            let nickname = self
+                .announced
+                .read()
+                .map(|held| held.clone())
+                .unwrap_or_default();
+            let presence = Presence::new(
+                &self.identity,
+                &nickname,
+                self.api_port,
+                self.hub,
+                &self.hub_name,
+            );
+            let signature = presence.sign(&self.identity);
+            self.mdns.reannounce(&presence, &signature, self.hub)
+        }
     }
 
     /// Listen without announcing.
@@ -135,7 +182,11 @@ impl Node {
             inner: Arc::clone(&registry),
         };
 
-        let mdns = Arc::new(if announce {
+        // Starting hidden registers nothing at all. Registering and then
+        // withdrawing would put us on every roster for a moment, which is the
+        // one thing the setting is for.
+        let hidden = Arc::new(AtomicBool::new(announce && config.anonymous));
+        let mdns = Arc::new(if announce && !config.anonymous {
             MdnsNode::start(&presence, &signature, config.hub)?
         } else {
             MdnsNode::observer()?
@@ -195,11 +246,15 @@ impl Node {
                 let identity = Arc::clone(&identity);
                 let config = config.clone();
                 let announced = Arc::clone(&announced);
+                let hidden = Arc::clone(&hidden);
                 tokio::spawn(async move {
                     let mut ticker =
                         tokio::time::interval(Duration::from_secs(ANNOUNCE_INTERVAL_SECS));
                     loop {
                         ticker.tick().await;
+                        if hidden.load(Ordering::Relaxed) {
+                            continue;
+                        }
                         // Read the name each tick, so a rename takes effect
                         // without the node being restarted.
                         let nickname = announced
@@ -277,6 +332,7 @@ impl Node {
             let identity = Arc::clone(&identity);
             let announced = Arc::clone(&announced);
             let config = config.clone();
+            let hidden = Arc::clone(&hidden);
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(Duration::from_secs(
                     crate::mdns::REANNOUNCE_INTERVAL_SECS,
@@ -284,6 +340,10 @@ impl Node {
                 ticker.tick().await; // the first tick is immediate
                 loop {
                     ticker.tick().await;
+                    // Refreshing would quietly undo going hidden.
+                    if hidden.load(Ordering::Relaxed) {
+                        continue;
+                    }
                     let nickname = announced
                         .read()
                         .map(|held| held.clone())
@@ -329,6 +389,8 @@ impl Node {
             api_port: config.api_port,
             hub: config.hub,
             hub_name: config.hub_name.clone(),
+            hidden,
+            can_announce: announce,
         })
     }
 
@@ -353,6 +415,10 @@ impl Node {
             held.clone_from(&presence.nickname);
         }
 
+        // Hidden, the new name is kept for when we come back, not announced.
+        if self.is_hidden() || !self.can_announce {
+            return Ok(());
+        }
         self.mdns.reannounce(&presence, &signature, self.hub)
     }
 

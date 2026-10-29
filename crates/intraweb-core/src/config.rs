@@ -43,6 +43,16 @@ pub struct Config {
 
     /// Seconds without a sighting before a peer drops off the roster.
     pub peer_timeout_secs: u64,
+
+    /// Listen without announcing: stay off everyone's roster while still
+    /// seeing theirs. It hides that you are here, not who you are -- anything
+    /// you send is signed with your key and goes straight to its recipient.
+    pub anonymous: bool,
+
+    /// Fetch nothing heavy and offer nothing heavy: pictures and attachments
+    /// are left where they are until asked for. For a node on a metered or
+    /// crowded link, and for neighbors who would otherwise pull from it.
+    pub low_data: bool,
 }
 
 impl Default for Config {
@@ -57,6 +67,8 @@ impl Default for Config {
             beacon_port: DEFAULT_BEACON_PORT,
             beacon_enabled: true,
             peer_timeout_secs: 30,
+            anonymous: false,
+            low_data: false,
         }
     }
 }
