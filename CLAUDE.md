@@ -158,6 +158,24 @@ key material independent.
     neighbors kept the node until its record expired. SIGTERM counts as an
     exit: a node run by a service manager is stopped with it, not Ctrl-C.
 
+26. **A private channel carries no attachments.** The shared folder is public;
+    anyone in range can list and fetch from it. A file offered inside a
+    private conversation would be readable by everyone all the same, and
+    encrypting the path would only hide that. `Post::check_limits` refuses it,
+    so a hostile node cannot send one either.
+27. **A picture is judged by its bytes, and SVG is never one.** The avatar is
+    served from the dashboard's own origin, where a script can do anything the
+    operator can. Magic bytes decide the type; the name and declared type are
+    the sender's to lie about.
+28. **Traffic numbers are local.** A node reports what it measured, never a
+    "network speed": that would mean broadcasting numbers to everyone, which
+    is replication, and throughput belongs to a pair of machines anyway.
+    Latency and throughput stay separate, throughput only from transfers over
+    32KB, and only outbound -- a served file is timed only to its headers.
+29. **Hidden hides that you are here, not who you are.** Anything sent while
+    hidden is still signed. Starting hidden registers nothing; registering and
+    withdrawing would flash you onto every roster.
+
 ## Conventions
 
 - Comments explain *why*, especially where a line encodes a security decision

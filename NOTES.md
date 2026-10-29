@@ -208,6 +208,27 @@ from the first release opens without the operator doing anything.
     exist yet. Outward-facing — waiting on an explicit yes.
 <!-- MEMORY_UPDATE_END -->
 
+<!-- MEMORY_UPDATE_START -->
+### Update: 2026-10-29 (dashboard batch, nets proposal pending)
+* **Decisions/Changes**:
+  * Channel posts can offer a file (POST_VERSION 2, schema v7); path signed,
+    traversal refused off the wire, private channels refuse attachments.
+  * Contacts (keyring + live roster), avatar upload (magic bytes, no SVG,
+    512KB), shared-file upload, hidden mode (live toggle, persisted), low data
+    mode (enforced on the node), local traffic counters.
+  * Dashboard: masthead channel switcher with "stepped out", foldable panels,
+    Activity panel, contacts + mail autofill, timestamps and names on posts,
+    inline pictures, attachment cost warnings, live sandboxed page preview.
+  * Pushed back on a broadcast "network speed": replication, and fiction.
+  * Fixed a pre-existing bug: the outbox dropped attachments on delivery.
+* **Known Bugs/Gaps**:
+  * Going hidden takes up to 30s for peers that also heard the beacon; there
+    is no signed beacon goodbye.
+  * Nets / leaders / impeachment / vote-kick / mandatory low data: NOT BUILT.
+    Waiting on Ben's answer to the Sybil problem (identities are free, so any
+    plain majority vote is won by whoever mints the most keys).
+<!-- MEMORY_UPDATE_END -->
+
 ## Open questions for Ben
 
 Answered in session (recorded so they are not re-litigated):
