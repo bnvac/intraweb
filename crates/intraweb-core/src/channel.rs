@@ -316,7 +316,6 @@ impl Invite {
         channel: ChannelId,
         name: &str,
         channel_key: &[u8; 32],
-        net: Option<crate::net::NetId>,
     ) -> Result<Self> {
         let wrapped = sealed::wrap_for(sealing, recipient_key, channel_key)?;
         let mut invite = Self {
@@ -327,11 +326,19 @@ impl Invite {
             to: recipient,
             created_at: now_secs(),
             wrapped_key: wrapped,
-            net,
+            net: None,
             signature: String::new(),
         };
         invite.signature = B64.encode(identity.sign(&invite.signing_bytes()));
         Ok(invite)
+    }
+
+    /// The same invitation, filed under a net. Signed again, since the net is
+    /// part of what is signed.
+    pub fn in_net(mut self, net: Option<crate::net::NetId>, identity: &Identity) -> Self {
+        self.net = net;
+        self.signature = B64.encode(identity.sign(&self.signing_bytes()));
+        self
     }
 
     fn signing_bytes(&self) -> Vec<u8> {
@@ -676,7 +683,6 @@ mod tests {
             channel,
             "crew",
             &key,
-            None,
         )
         .unwrap();
 
@@ -705,7 +711,6 @@ mod tests {
             ChannelId::new_private().unwrap(),
             "crew",
             &key,
-            None,
         )
         .unwrap();
 
@@ -732,7 +737,6 @@ mod tests {
             ChannelId::new_private().unwrap(),
             "crew",
             &key,
-            None,
         )
         .unwrap();
         invite.from = alice.peer_id();
@@ -754,9 +758,9 @@ mod tests {
             ChannelId::new_private().unwrap(),
             "crew",
             &key,
-            Some(net),
         )
-        .unwrap();
+        .unwrap()
+        .in_net(Some(net), &alice);
         assert!(invite.accept(bob.peer_id(), &bk, &ak.public()).is_ok());
 
         let mut moved = invite.clone();
@@ -781,7 +785,6 @@ mod tests {
             ChannelId::new_private().unwrap(),
             "crew",
             &key,
-            None,
         )
         .unwrap();
 

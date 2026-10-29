@@ -319,8 +319,8 @@ pub async fn invite(
         channel,
         &name,
         &channel_key,
-        net,
-    )?;
+    )?
+    .in_net(net, identity);
 
     let addr = peer
         .preferred_addr()
