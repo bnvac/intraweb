@@ -12,6 +12,7 @@ pub mod hex;
 pub mod identicon;
 pub mod identity;
 pub mod mail;
+pub mod net;
 pub mod peer;
 pub mod sealed;
 pub mod vault;

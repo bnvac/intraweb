@@ -32,6 +32,7 @@ const NEIGHBORHOOD_LABEL: &[u8] = b"intraweb-neighborhood-channel-v1";
 /// A guestbook is a public channel belonging to one key, so its id is derived
 /// from that key. Anyone can compute where to sign; only the owner keeps it.
 const GUESTBOOK_LABEL: &[u8] = b"intraweb-guestbook-v1";
+const DIRECTORY_LABEL: &[u8] = b"intraweb-net-directory-v1";
 
 /// Identifies a channel. Random for a private one, fixed for the public one.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -62,6 +63,21 @@ impl ChannelId {
 
     pub fn is_guestbook_of(&self, owner: PeerId) -> bool {
         *self == Self::guestbook_of(owner)
+    }
+
+    /// Where nets announce themselves, so an open net can be found. Fixed, like
+    /// the neighborhood channel, so every node files the same one.
+    pub fn directory() -> Self {
+        Self(Sha256::digest(DIRECTORY_LABEL).into())
+    }
+
+    /// A channel derived from something else's id, the way a guestbook is
+    /// derived from its owner's key. How a net's own channels are found.
+    pub(crate) fn derived(label: &[u8], from: &[u8; 32]) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(label);
+        hasher.update(from);
+        Self(hasher.finalize().into())
     }
 
     pub fn new_private() -> Result<Self> {
