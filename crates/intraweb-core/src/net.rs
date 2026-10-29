@@ -308,7 +308,37 @@ impl NetState {
 /// holding the same entries sees the same sequence whatever order they arrived
 /// in. `now` only decides which open motions have run out of time.
 pub fn fold(net: NetId, mut entries: Vec<Entry>, now: u64) -> NetState {
-    entries.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.signature.cmp(&b.signature)));
+    // Clocks are only roughly right, and a second is coarse, so time alone
+    // does not order a log causally. The founding charter goes first whatever
+    // its timestamp -- nothing in a net can precede the net -- and within one
+    // second a join comes before a motion, which comes before a vote. Before
+    // this, a join signed in the same second as the charter could sort ahead
+    // of it and be thrown away. (Real bug, named regression test.)
+    let founding = entries
+        .iter()
+        .filter(|e| match &e.event {
+            Event::Charter { net: id, nonce, .. } => {
+                *id == net && NetId::derive(e.from, nonce) == net
+            }
+            _ => false,
+        })
+        .min_by(|a, b| a.at.cmp(&b.at).then_with(|| a.signature.cmp(&b.signature)))
+        .map(|e| e.signature.clone());
+    entries.sort_by(|a, b| {
+        let a_founds = founding.as_ref() == Some(&a.signature);
+        let b_founds = founding.as_ref() == Some(&b.signature);
+        b_founds
+            .cmp(&a_founds)
+            .then_with(|| a.at.cmp(&b.at))
+            .then_with(|| rank(&a.event).cmp(&rank(&b.event)))
+            .then_with(|| a.signature.cmp(&b.signature))
+    });
+    // Votes for a motion the fold has not reached yet. A voter whose clock
+    // runs behind the mover's signs a vote that sorts before the motion; it is
+    // held here and counted when the motion opens, so a slow clock does not
+    // cost anybody their vote.
+    let mut waiting: std::collections::HashMap<String, Vec<(PeerId, bool, String, u64)>> =
+        std::collections::HashMap::new();
 
     let mut state = NetState {
         net,
@@ -460,16 +490,28 @@ pub fn fold(net: NetId, mut entries: Vec<Entry>, now: u64) -> NetState {
                 );
                 // Opening a motion is a vote for it.
                 cast(&mut state, id, entry.from, true, &entry.signature, entry.at);
+                for (voter, yes, signature, at) in waiting.remove(id).unwrap_or_default() {
+                    cast(&mut state, id, voter, yes, &signature, at);
+                }
             }
             Event::Vote { motion, yes, .. } => {
-                cast(
-                    &mut state,
-                    motion,
-                    entry.from,
-                    *yes,
-                    &entry.signature,
-                    entry.at,
-                );
+                if state.motions.iter().any(|m| &m.id == motion) {
+                    cast(
+                        &mut state,
+                        motion,
+                        entry.from,
+                        *yes,
+                        &entry.signature,
+                        entry.at,
+                    );
+                } else {
+                    waiting.entry(motion.clone()).or_default().push((
+                        entry.from,
+                        *yes,
+                        entry.signature.clone(),
+                        entry.at,
+                    ));
+                }
             }
             Event::Policy {
                 low_data_mandatory, ..
@@ -510,6 +552,18 @@ pub fn fold(net: NetId, mut entries: Vec<Entry>, now: u64) -> NetState {
     }
     expire(&mut state, now);
     state
+}
+
+/// Causal order within one second: a net before its members, members before
+/// motions, motions before votes on them.
+fn rank(event: &Event) -> u8 {
+    match event {
+        Event::Charter { .. } => 0,
+        Event::Join { .. } => 1,
+        Event::Motion { .. } => 2,
+        Event::Vote { .. } => 3,
+        _ => 4,
+    }
 }
 
 fn short(peer: PeerId) -> String {
@@ -757,6 +811,87 @@ mod tests {
         let state = net.state();
         assert_eq!(state.founder, Some(p[0].peer_id()));
         assert_eq!(state.name.as_deref(), Some("basecamp"));
+    }
+
+    fn entry(who: &Identity, at: u64, signature: &str, event: Event) -> Entry {
+        Entry {
+            from: who.peer_id(),
+            at,
+            signature: signature.into(),
+            event,
+        }
+    }
+
+    /// Regression: a join signed in the same second as the charter, whose
+    /// signature happened to sort first, was folded before the net existed
+    /// and thrown away. Found as an intermittent test failure.
+    #[test]
+    fn a_join_in_the_same_second_as_the_charter_still_counts() {
+        let p = people(2);
+        let (net, nonce) = NetId::found(p[0].peer_id()).unwrap();
+        let log = vec![
+            entry(&p[1], 500, "00", Event::Join { net }),
+            entry(
+                &p[0],
+                500,
+                "ff",
+                Event::Charter {
+                    net,
+                    name: "basecamp".into(),
+                    nonce,
+                },
+            ),
+        ];
+        assert!(fold(net, log, 600).is_member(p[1].peer_id()));
+    }
+
+    /// A voter whose clock runs behind the mover's signs a vote dated before
+    /// the motion. It must still count.
+    #[test]
+    fn a_vote_from_a_slow_clock_is_not_lost() {
+        let p = people(3);
+        let (net, nonce) = NetId::found(p[0].peer_id()).unwrap();
+        let eligible: Vec<String> = p.iter().map(|x| short_key(x.peer_id())).collect();
+        let log = vec![
+            entry(
+                &p[0],
+                100,
+                "a1",
+                Event::Charter {
+                    net,
+                    name: "basecamp".into(),
+                    nonce,
+                },
+            ),
+            entry(&p[1], 110, "a2", Event::Join { net }),
+            entry(&p[2], 120, "a3", Event::Join { net }),
+            entry(
+                &p[1],
+                200,
+                "a4",
+                Event::Motion {
+                    net,
+                    id: "0123456789abcdef".into(),
+                    kind: MotionKind::Impeach,
+                    target: p[0].peer_id(),
+                    eligible,
+                },
+            ),
+            // Carol's clock is a minute slow.
+            entry(
+                &p[2],
+                140,
+                "a5",
+                Event::Vote {
+                    net,
+                    motion: "0123456789abcdef".into(),
+                    yes: true,
+                },
+            ),
+        ];
+        let state = fold(net, log, 300);
+        assert_eq!(state.motions[0].status, MotionStatus::Passed);
+        assert_ne!(state.leader, Some(p[0].peer_id()));
     }
 
     #[test]

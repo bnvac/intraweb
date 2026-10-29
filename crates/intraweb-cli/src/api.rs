@@ -18,6 +18,7 @@ use axum::routing::{get, post};
 use intraweb_core::SignedMail;
 use intraweb_core::channel::{ChannelId, Invite, SignedPost};
 use intraweb_core::identity::PeerId;
+use intraweb_core::net::{MotionKind, NetId};
 use intraweb_core::peer::now_secs;
 use intraweb_core::sealed::SealingKey;
 use intraweb_core::{Config, Identity, Store, Vault};
@@ -490,6 +491,266 @@ async fn set_hidden(State(state): State<AppState>, body: String) -> impl IntoRes
         )
             .into_response(),
     }
+}
+
+/* ---------------------------------------------------------------- nets ---- */
+
+/// A net as the dashboard lists it: what the directory says, plus what we
+/// know from its log if we are in it.
+#[derive(Serialize)]
+struct NetSummary {
+    #[serde(flatten)]
+    listing: crate::nets::Listing,
+    joined: bool,
+    members: usize,
+    leader: Option<String>,
+    low_data_mandatory: bool,
+    you_lead: bool,
+}
+
+async fn list_nets(State(state): State<AppState>) -> impl IntoResponse {
+    let listed = crate::nets::directory(&state.store).unwrap_or_default();
+    let joined = crate::nets::joined(&state.store).unwrap_or_default();
+    let me = state.identity.peer_id();
+    let nets: Vec<NetSummary> = listed
+        .into_iter()
+        .map(|listing| {
+            let is_in = joined.contains(&listing.net_id);
+            let known = is_in
+                .then(|| crate::nets::state(&state.store, listing.net_id).ok())
+                .flatten();
+            NetSummary {
+                joined: is_in,
+                members: known.as_ref().map_or(0, |s| s.members.len()),
+                leader: known.as_ref().and_then(|s| s.leader).map(PeerId::to_hex),
+                low_data_mandatory: known.as_ref().is_some_and(|s| s.low_data_mandatory),
+                you_lead: known.as_ref().is_some_and(|s| s.leader == Some(me)),
+                listing,
+            }
+        })
+        .collect();
+    axum::Json(nets)
+}
+
+/// Everything about one net, with names for the keys in it.
+async fn net_detail(
+    State(state): State<AppState>,
+    Path(net_hex): Path<String>,
+) -> impl IntoResponse {
+    let Some(net) = NetId::parse_hex(&net_hex) else {
+        return (StatusCode::BAD_REQUEST, "not a valid net id").into_response();
+    };
+    let current = match crate::nets::state(&state.store, net) {
+        Ok(current) => current,
+        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")).into_response(),
+    };
+    // Names are a convenience; the dashboard shows fingerprints beside them.
+    let mut names = serde_json::Map::new();
+    if let Ok(store) = state.store.lock() {
+        for person in store.known_peers(1000).unwrap_or_default() {
+            names.insert(person.peer_id.to_hex(), person.nickname.into());
+        }
+    }
+    for peer in state.roster.peers() {
+        names.insert(peer.peer_id.to_hex(), peer.nickname.into());
+    }
+    names.insert(
+        state.identity.peer_id().to_hex(),
+        state.config.sanitized_nickname().into(),
+    );
+    axum::Json(serde_json::json!({ "net": current, "names": names })).into_response()
+}
+
+fn net_from(hex: &str) -> Result<NetId, (StatusCode, &'static str)> {
+    NetId::parse_hex(hex).ok_or((StatusCode::BAD_REQUEST, "not a valid net id"))
+}
+
+fn net_result<T>(
+    result: anyhow::Result<T>,
+    ok: impl FnOnce(T) -> String,
+) -> axum::response::Response {
+    match result {
+        Ok(value) => (StatusCode::OK, ok(value)).into_response(),
+        // Every refusal here is the operator's to act on: not a member, not
+        // the leader, vote already closed.
+        Err(err) => (StatusCode::BAD_REQUEST, format!("{err:#}")).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct NewNet {
+    name: String,
+}
+
+async fn new_net(State(state): State<AppState>, body: String) -> impl IntoResponse {
+    let Ok(request) = serde_json::from_str::<NewNet>(&body) else {
+        return (StatusCode::BAD_REQUEST, "could not read that").into_response();
+    };
+    net_result(
+        crate::nets::create(&state.store, &state.identity, &state.roster, &request.name).await,
+        NetId::to_hex,
+    )
+}
+
+async fn join_net(State(state): State<AppState>, Path(net_hex): Path<String>) -> impl IntoResponse {
+    let net = match net_from(&net_hex) {
+        Ok(net) => net,
+        Err(refused) => return refused.into_response(),
+    };
+    net_result(
+        crate::nets::join(&state.store, &state.identity, &state.roster, net).await,
+        |()| "Joined.".into(),
+    )
+}
+
+async fn leave_net(
+    State(state): State<AppState>,
+    Path(net_hex): Path<String>,
+) -> impl IntoResponse {
+    let net = match net_from(&net_hex) {
+        Ok(net) => net,
+        Err(refused) => return refused.into_response(),
+    };
+    net_result(
+        crate::nets::leave(&state.store, &state.identity, &state.roster, net).await,
+        |()| "Left. What was said there is kept.".into(),
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct MotionBody {
+    kind: MotionKind,
+    target: String,
+}
+
+async fn open_motion(
+    State(state): State<AppState>,
+    Path(net_hex): Path<String>,
+    body: String,
+) -> impl IntoResponse {
+    let net = match net_from(&net_hex) {
+        Ok(net) => net,
+        Err(refused) => return refused.into_response(),
+    };
+    let Ok(request) = serde_json::from_str::<MotionBody>(&body) else {
+        return (StatusCode::BAD_REQUEST, "could not read that").into_response();
+    };
+    let Some(target) = PeerId::parse_hex(&request.target) else {
+        return (StatusCode::BAD_REQUEST, "not a valid key").into_response();
+    };
+    net_result(
+        crate::nets::open_motion(
+            &state.store,
+            &state.identity,
+            &state.roster,
+            net,
+            request.kind,
+            target,
+        )
+        .await,
+        |_| "The vote is open. Your vote is counted as yes.".into(),
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct VoteBody {
+    motion: String,
+    yes: bool,
+}
+
+async fn vote_in_net(
+    State(state): State<AppState>,
+    Path(net_hex): Path<String>,
+    body: String,
+) -> impl IntoResponse {
+    let net = match net_from(&net_hex) {
+        Ok(net) => net,
+        Err(refused) => return refused.into_response(),
+    };
+    let Ok(request) = serde_json::from_str::<VoteBody>(&body) else {
+        return (StatusCode::BAD_REQUEST, "could not read that").into_response();
+    };
+    net_result(
+        crate::nets::vote(
+            &state.store,
+            &state.identity,
+            &state.roster,
+            net,
+            &request.motion,
+            request.yes,
+        )
+        .await,
+        |()| "Vote cast.".into(),
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct PolicyBody {
+    low_data_mandatory: bool,
+}
+
+async fn net_policy(
+    State(state): State<AppState>,
+    Path(net_hex): Path<String>,
+    body: String,
+) -> impl IntoResponse {
+    let net = match net_from(&net_hex) {
+        Ok(net) => net,
+        Err(refused) => return refused.into_response(),
+    };
+    let Ok(request) = serde_json::from_str::<PolicyBody>(&body) else {
+        return (StatusCode::BAD_REQUEST, "could not read that").into_response();
+    };
+    net_result(
+        crate::nets::set_policy(
+            &state.store,
+            &state.identity,
+            &state.roster,
+            net,
+            request.low_data_mandatory,
+        )
+        .await,
+        |()| {
+            if request.low_data_mandatory {
+                "Low data is now mandatory for everyone in this net.".into()
+            } else {
+                "Mandatory low data lifted.".into()
+            }
+        },
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct AnnounceBody {
+    text: String,
+    #[serde(default)]
+    ping: bool,
+}
+
+async fn net_announce(
+    State(state): State<AppState>,
+    Path(net_hex): Path<String>,
+    body: String,
+) -> impl IntoResponse {
+    let net = match net_from(&net_hex) {
+        Ok(net) => net,
+        Err(refused) => return refused.into_response(),
+    };
+    let Ok(request) = serde_json::from_str::<AnnounceBody>(&body) else {
+        return (StatusCode::BAD_REQUEST, "could not read that").into_response();
+    };
+    net_result(
+        crate::nets::announce(
+            &state.store,
+            &state.identity,
+            &state.roster,
+            net,
+            &request.text,
+            request.ping,
+        )
+        .await,
+        |delivery| format!("Announced to {} neighbor(s).", delivery.reached),
+    )
 }
 
 /// Somebody whose key is in the keyring, and whether they are in range now.
@@ -1411,8 +1672,40 @@ async fn say_in_channel(
     if said.body.trim().is_empty() && attachment.is_none() {
         return (StatusCode::BAD_REQUEST, "nothing to say").into_response();
     }
+    // A net's log and the directory only hold signed events; a stray line of
+    // chat there would be noise every member's node has to skip forever.
+    let role = state.store.lock().ok().and_then(|store| {
+        store
+            .channels()
+            .ok()?
+            .into_iter()
+            .find(|c| c.channel_id == channel)
+            .map(|c| c.role)
+    });
+    if role
+        .as_deref()
+        .is_some_and(|role| role != crate::nets::ROLE_CHAT)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "that channel is a net's record, not a conversation",
+        )
+            .into_response();
+    }
     if let Err(refused) = check_offer(&state, attachment) {
         return refused.into_response();
+    }
+    // A net's leader can make low data mandatory for everyone in it. Checked
+    // here, on the node, so an old tab or a script cannot step around it.
+    if attachment.is_some()
+        && let Some(net) = crate::nets::net_of(&state.store, channel)
+        && crate::nets::state(&state.store, net).is_ok_and(|net| net.low_data_mandatory)
+    {
+        return (
+            StatusCode::CONFLICT,
+            "this net's leader has made low data mode mandatory, so files cannot be attached here",
+        )
+            .into_response();
     }
 
     match crate::channels::say(
@@ -1437,14 +1730,42 @@ async fn say_in_channel(
 #[derive(serde::Deserialize)]
 struct NewChannel {
     name: String,
+    /// The net to file it under, if any. Its members are who it is for.
+    #[serde(default)]
+    net: Option<String>,
 }
 
 async fn new_channel(State(state): State<AppState>, body: String) -> impl IntoResponse {
     let Ok(request) = serde_json::from_str::<NewChannel>(&body) else {
         return (StatusCode::BAD_REQUEST, "could not read that").into_response();
     };
+    let net = match request.net.as_deref().filter(|n| !n.is_empty()) {
+        None => None,
+        Some(hex) => match NetId::parse_hex(hex) {
+            Some(net) => Some(net),
+            None => return (StatusCode::BAD_REQUEST, "not a valid net id").into_response(),
+        },
+    };
+    if let Some(net) = net
+        && !crate::nets::state(&state.store, net)
+            .is_ok_and(|s| s.is_member(state.identity.peer_id()))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "join that net before making channels in it",
+        )
+            .into_response();
+    }
     match crate::channels::create_private(&state.store, &state.identity, &request.name) {
-        Ok(channel) => (StatusCode::OK, channel.to_hex()).into_response(),
+        Ok(channel) => {
+            if let Some(net) = net
+                && let Ok(store) = state.store.lock()
+                && let Err(err) = store.set_channel_net(channel, Some(net), crate::nets::ROLE_CHAT)
+            {
+                return (StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")).into_response();
+            }
+            (StatusCode::OK, channel.to_hex()).into_response()
+        }
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")).into_response(),
     }
 }
@@ -1519,6 +1840,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hidden", post(set_hidden))
         .route("/api/activity", get(activity))
         .route("/api/low-data", post(set_low_data))
+        .route("/api/nets", get(list_nets))
+        .route("/api/nets/new", post(new_net))
+        .route("/api/nets/{net}", get(net_detail))
+        .route("/api/nets/{net}/join", post(join_net))
+        .route("/api/nets/{net}/leave", post(leave_net))
+        .route("/api/nets/{net}/motion", post(open_motion))
+        .route("/api/nets/{net}/vote", post(vote_in_net))
+        .route("/api/nets/{net}/policy", post(net_policy))
+        .route("/api/nets/{net}/announce", post(net_announce))
         .route("/api/files/{name}", post(put_shared_file))
         .route("/api/avatar", post(put_avatar).delete(delete_avatar))
         .route("/api/site", get(get_site).post(put_site))

@@ -6,6 +6,7 @@ mod guard;
 mod http;
 mod limits;
 mod mail;
+mod nets;
 mod surf;
 mod traffic;
 mod tui;
@@ -333,6 +334,7 @@ async fn up(vault: Vault, args: UpArgs) -> Result<()> {
 
     channels::ensure_neighborhood(&store)?;
     channels::ensure_guestbook(&store, &identity)?;
+    nets::ensure_directory(&store)?;
 
     let node = Arc::new(
         Node::start(&config, Arc::clone(&identity), Arc::clone(&store))
