@@ -300,6 +300,29 @@ It listens on both discovery paths and tells you which one is working. intraweb
 announces over **mDNS** and **UDP broadcast** at the same time precisely because
 so many networks quietly break one of them.
 
+## Media libraries
+
+Already run Jellyfin, Navidrome, Calibre-Web or Immich? Point the
+neighborhood at it:
+
+```sh
+intraweb library add Films 8096          # kind guessed from the port
+intraweb library add Books 8083 --kind books
+intraweb library list
+intraweb libraries bob                   # what bob points at
+```
+
+Each library shows up as a button on your card in everyone's dashboard. It is
+a link, not a relay: their browser goes straight to the service on your
+machine, so the media never passes through intraweb or a hub, and it streams
+as fast as the two machines manage. The service has to listen on your network
+(not only on localhost) and your firewall has to allow its port; `library add`
+warns if nothing is answering yet.
+
+A neighbor's list is checked before it is shown: names lose markup, a path
+can only be a path on that neighbor's own address, and nobody can list more
+than sixteen.
+
 ## No router? Bring one
 
 intraweb only needs machines that can hear each other. It does not need the

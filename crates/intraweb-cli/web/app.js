@@ -110,6 +110,7 @@ function neighborCard(peer, rank, now) {
         <button type="button" data-sign="${escapeHtml(peer.peer_id)}">Sign guestbook</button>
         <button type="button" class="danger" data-block="${escapeHtml(peer.peer_id)}">Block</button>
       </div>
+      ${host ? `<div class="libs" data-libs="${escapeHtml(peer.peer_id)}"></div>` : ""}
     </article>`;
 }
 
@@ -279,6 +280,41 @@ function renderRosters(peers, status) {
     : `<p class="empty">${
         hubs.length ? "No neighbors beyond the hub yet." : "Nobody in range yet."
       }</p>`;
+  fillLibraries();
+}
+
+// A neighbor's media libraries change rarely, so ask each node at most once a
+// minute however often the roster redraws.
+const libraryCache = new Map();
+const LIBRARY_GLYPH = { video: "\u25B6", music: "\u266A", books: "\u2261", photos: "\u25A3", other: "\u2197" };
+
+function libraryButtons(links) {
+  return links
+    .map((l) => `<a class="lib" href="${escapeHtml(l.url)}" target="_blank" rel="noopener"
+        title="Opens ${escapeHtml(l.url)} on their machine">${LIBRARY_GLYPH[l.kind] || LIBRARY_GLYPH.other} ${escapeHtml(l.name)}</a>`)
+    .join("");
+}
+
+function fillLibraries() {
+  const now = Date.now();
+  for (const el of document.querySelectorAll("[data-libs]")) {
+    const id = el.dataset.libs;
+    let cached = libraryCache.get(id);
+    if (!cached || now - cached.at > 60000) {
+      cached = { at: now, links: cached ? cached.links : [] };
+      libraryCache.set(id, cached);
+      fetch(`/api/peers/${encodeURIComponent(id)}/libraries`)
+        .then((r) => (r.ok ? r.json() : []))
+        .then((links) => {
+          cached.links = Array.isArray(links) ? links : [];
+          for (const target of document.querySelectorAll(`[data-libs="${CSS.escape(id)}"]`)) {
+            target.innerHTML = libraryButtons(cached.links);
+          }
+        })
+        .catch(() => {});
+    }
+    el.innerHTML = libraryButtons(cached.links);
+  }
 }
 
 /// An attachment lives on the sender's node, so the link points there.

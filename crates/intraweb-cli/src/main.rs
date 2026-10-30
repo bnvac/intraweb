@@ -111,6 +111,18 @@ enum Command {
         /// Which channel, by name or id. Defaults to the neighborhood.
         channel: Option<String>,
     },
+    /// Point neighbors at a media library you already run here: Jellyfin,
+    /// Navidrome, Calibre-Web, Immich. They get a link; the media goes straight
+    /// from the service to them and never through intraweb.
+    Library {
+        #[command(subcommand)]
+        cmd: LibraryCmd,
+    },
+    /// See the media libraries a neighbor points at.
+    Libraries {
+        /// Nickname, fingerprint, or public key.
+        peer: String,
+    },
     /// Make and manage private channels.
     Channel {
         #[command(subcommand)]
@@ -151,6 +163,30 @@ enum ChannelCmd {
         /// Nickname, fingerprint, or public key.
         peer: String,
     },
+}
+
+#[derive(Subcommand)]
+enum LibraryCmd {
+    /// List a service on this machine, e.g. `intraweb library add Films 8096`.
+    Add {
+        /// What neighbors see on the button.
+        name: String,
+        /// The port the service listens on.
+        port: u16,
+        /// Where its web interface starts.
+        #[arg(long, default_value = "/")]
+        path: String,
+        /// video, music, books, photos or other. Guessed from the port if left out.
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Stop listing a library. The service itself is untouched.
+    Remove {
+        /// The name it was added under.
+        name: String,
+    },
+    /// Show the libraries you list.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -261,6 +297,8 @@ async fn run() -> Result<()> {
         Command::Sign { peer, message } => sign_command(vault, &peer, &message.join(" ")).await,
         Command::Guestbook => guestbook_command(vault),
         Command::Channel { cmd } => channel_command(vault, cmd).await,
+        Command::Library { cmd } => library_command(vault, cmd),
+        Command::Libraries { peer } => libraries_command(vault, &peer).await,
         Command::Get { peer, file, output } => get_command(vault, &peer, &file, output).await,
         Command::Doctor { listen } => doctor(vault, listen).await,
         Command::Id => show_id(vault),
@@ -1068,6 +1106,93 @@ fn blocked_command(vault: Vault) -> Result<()> {
     }
     for peer_id in blocked {
         println!("  {}  {}", peer_id.fingerprint(), peer_id.to_hex());
+    }
+    Ok(())
+}
+
+fn library_command(vault: Vault, cmd: LibraryCmd) -> Result<()> {
+    use intraweb_core::library::{Library, MAX_LIBRARIES};
+    let (_, mut config, _) = open_vault(&vault)?;
+    match cmd {
+        LibraryCmd::Add {
+            name,
+            port,
+            path,
+            kind,
+        } => {
+            let kind = kind.unwrap_or_else(|| Library::kind_for_port(port).to_string());
+            let library = Library::checked(&name, port, &path, &kind)?;
+            config
+                .libraries
+                .retain(|l| !l.name.eq_ignore_ascii_case(&library.name));
+            anyhow::ensure!(
+                config.libraries.len() < MAX_LIBRARIES,
+                "you already list {MAX_LIBRARIES} libraries; remove one first"
+            );
+            config.libraries.push(library.clone());
+            config.save(&vault.config_path())?;
+            println!(
+                "Listed {} ({}) on port {}, path {}.",
+                library.name, library.kind, library.port, library.path
+            );
+            // A link to nothing is worse than no link, so say so now rather
+            // than letting a neighbor find out.
+            let here = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            if std::net::TcpStream::connect_timeout(&here, Duration::from_millis(500)).is_err() {
+                println!(
+                    "Nothing is answering on port {port} yet. Start the service and it will work."
+                );
+            }
+            println!(
+                "Neighbors reach it directly, so it must listen on your network, not only on \
+                 localhost, and your firewall must allow port {port}."
+            );
+        }
+        LibraryCmd::Remove { name } => {
+            let before = config.libraries.len();
+            config
+                .libraries
+                .retain(|l| !l.name.eq_ignore_ascii_case(&name));
+            anyhow::ensure!(
+                config.libraries.len() < before,
+                "you have no library called {name}; `intraweb library list` shows them"
+            );
+            config.save(&vault.config_path())?;
+            println!("Stopped listing {name}. The service itself is untouched.");
+        }
+        LibraryCmd::List => {
+            if config.libraries.is_empty() {
+                println!("You list no libraries. Add one with: intraweb library add Films 8096");
+            }
+            for lib in &config.libraries {
+                println!(
+                    "  {:<20} {:<7} port {}{}",
+                    lib.name, lib.kind, lib.port, lib.path
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn libraries_command(vault: Vault, query: &str) -> Result<()> {
+    let (identity, config, _) = open_vault(&vault)?;
+    let store = Arc::new(Mutex::new(Store::open(&vault.db_path())?));
+    let config = Arc::new(config);
+
+    let peers = peers_now(&vault, &config, &identity, &store, 3).await?;
+    let peer = mail::resolve_or_explain(&peers, query)?;
+    let addr = peer
+        .preferred_addr()
+        .context("that peer has no address yet")?;
+    let links = api::fetch_libraries(addr, peer.api_port).await?;
+    if links.is_empty() {
+        println!("{} lists no media libraries.", peer.nickname);
+        return Ok(());
+    }
+    println!("{} ({})", peer.nickname, peer.fingerprint);
+    for link in &links {
+        println!("  {:<20} {:<7} {}", link.name, link.kind, link.url);
     }
     Ok(())
 }

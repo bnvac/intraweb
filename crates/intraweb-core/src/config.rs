@@ -1,5 +1,6 @@
 //! Node configuration. Small on purpose: discovery is meant to need no setup.
 
+use crate::library::Library;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -53,6 +54,12 @@ pub struct Config {
     /// are left where they are until asked for. For a node on a metered or
     /// crowded link, and for neighbors who would otherwise pull from it.
     pub low_data: bool,
+
+    /// Media libraries you already run on this machine (Jellyfin, Navidrome,
+    /// Calibre-Web...), shown to neighbors as links. Links only: their
+    /// browser goes straight to the service and no node carries the media.
+    /// Last in the struct because TOML writes tables after plain values.
+    pub libraries: Vec<Library>,
 }
 
 impl Default for Config {
@@ -69,6 +76,7 @@ impl Default for Config {
             peer_timeout_secs: 30,
             anonymous: false,
             low_data: false,
+            libraries: Vec::new(),
         }
     }
 }

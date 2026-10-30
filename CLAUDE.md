@@ -191,6 +191,11 @@ key material independent.
     in advance still do, and the dashboard says so. Do not claim more.
 33. **A net id proves its founder.** It is derived from the founder's key and
     a nonce, so a copied charter founds nothing.
+34. **A library is a link, not a relay.** `intraweb library` lists a media
+    service the node already runs; neighbors get a button that opens it on
+    that node's own address. The URL is built from the address we reach the
+    peer on, never taken from the list they send, and every entry goes
+    through `Library::checked`, because the list comes from a stranger.
 
 ## Conventions
 

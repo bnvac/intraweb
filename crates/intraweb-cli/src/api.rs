@@ -18,13 +18,14 @@ use axum::routing::{get, post};
 use intraweb_core::SignedMail;
 use intraweb_core::channel::{ChannelId, Invite, SignedPost};
 use intraweb_core::identity::PeerId;
+use intraweb_core::library::{Library, MAX_LIBRARIES, sanitize_list};
 use intraweb_core::net::{MotionKind, NetId};
 use intraweb_core::peer::now_secs;
 use intraweb_core::sealed::SealingKey;
 use intraweb_core::{Config, Identity, Store, Vault};
 use intraweb_net::Roster;
 use serde::Serialize;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -161,6 +162,82 @@ async fn verify_peer(
         )
             .into_response(),
     }
+}
+
+/// The media libraries this node points neighbors at. Read from the config on
+/// each request, so `intraweb library add` shows up without a restart.
+async fn own_libraries(State(state): State<AppState>) -> impl IntoResponse {
+    let libraries = Config::load_or_create(&state.vault.config_path())
+        .map(|config| sanitize_list(config.libraries))
+        .unwrap_or_default();
+    axum::Json(libraries)
+}
+
+/// A library as the dashboard needs it: a label and where to point the browser.
+#[derive(Debug, Serialize)]
+pub struct LibraryLink {
+    pub name: String,
+    pub kind: String,
+    pub url: String,
+}
+
+/// A neighbor's libraries, asked of their node directly. The list comes from a
+/// stranger, so every entry is re-checked before the dashboard sees it.
+async fn peer_libraries(
+    State(state): State<AppState>,
+    Path(peer_hex): Path<String>,
+) -> impl IntoResponse {
+    let Some(peer_id) = PeerId::parse_hex(&peer_hex) else {
+        return (StatusCode::BAD_REQUEST, "not a valid peer id").into_response();
+    };
+    let Some(peer) = state
+        .roster
+        .peers()
+        .into_iter()
+        .find(|p| p.peer_id == peer_id)
+    else {
+        return (StatusCode::NOT_FOUND, "that neighbor is not in range").into_response();
+    };
+    let Some(addr) = peer.preferred_addr() else {
+        return (StatusCode::NOT_FOUND, "that neighbor has no address yet").into_response();
+    };
+    // A neighbor that does not answer simply has no libraries to show.
+    let links = fetch_libraries(addr, peer.api_port)
+        .await
+        .unwrap_or_default();
+    axum::Json(links).into_response()
+}
+
+/// Ask a node for its libraries and turn each into a link on that node's own
+/// address. The URL is built here from the address we already reach them on,
+/// never taken from the sender, so a list cannot point the browser elsewhere.
+pub async fn fetch_libraries(addr: IpAddr, api_port: u16) -> Result<Vec<LibraryLink>> {
+    let response =
+        crate::http::get(addr, api_port, "/api/libraries", Duration::from_secs(4)).await?;
+    anyhow::ensure!(
+        response.is_success(),
+        "they answered HTTP {}",
+        response.status
+    );
+    let raw: Vec<serde_json::Value> =
+        serde_json::from_str(&response.body).context("they sent a list we could not read")?;
+    let host = crate::http::host_for(addr);
+    Ok(raw
+        .iter()
+        .filter_map(|v| {
+            let name = v.get("name")?.as_str()?;
+            let port = u16::try_from(v.get("port")?.as_u64()?).ok()?;
+            let path = v.get("path").and_then(|p| p.as_str()).unwrap_or("/");
+            let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("other");
+            Library::checked(name, port, path, kind).ok()
+        })
+        .take(MAX_LIBRARIES)
+        .map(|lib| LibraryLink {
+            url: format!("http://{host}:{}{}", lib.port, lib.path),
+            name: lib.name,
+            kind: lib.kind,
+        })
+        .collect())
 }
 
 /// Refuse to see or hear from a key from now on.
@@ -1836,6 +1913,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/guestbook", get(read_guestbook))
         .route("/api/guestbook/{peer}", post(sign_guestbook))
         .route("/api/files", get(shared_files))
+        .route("/api/libraries", get(own_libraries))
+        .route("/api/peers/{peer_id}/libraries", get(peer_libraries))
         .route("/api/contacts", get(contacts))
         .route("/api/hidden", post(set_hidden))
         .route("/api/activity", get(activity))
