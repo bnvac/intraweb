@@ -300,6 +300,24 @@ It listens on both discovery paths and tells you which one is working. intraweb
 announces over **mDNS** and **UDP broadcast** at the same time precisely because
 so many networks quietly break one of them.
 
+## No router? Bring one
+
+intraweb only needs machines that can hear each other. It does not need the
+internet, and it does not need a router.
+
+- **An ESP32.** `hardware/esp32-ap` turns a $5 board into a Wi-Fi network on a
+  battery bank: up to 10 devices, a page that tells newcomers what to run, and
+  nothing stored on it. See its README for flashing.
+- **A laptop or Pi.** `nmcli device wifi hotspot ssid intraweb password
+  neighborhood` makes a network on Linux; the machine sharing it runs
+  `intraweb up` like everyone else.
+- **A phone hotspot**, with mobile data off if you want to be sure nothing
+  leaves the room.
+- **Any old router** with no cable in the WAN port.
+
+Whichever you use, check client isolation is off, and run `intraweb doctor` if
+nobody shows up.
+
 ## Status
 
 Working today: discovery, portable identity, the roster, the web and terminal
