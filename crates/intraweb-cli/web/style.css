@@ -170,7 +170,7 @@ body {
 .neighbor .actions { grid-column: 2; margin-top: .4rem; display: flex; gap: .45rem; flex-wrap: wrap; }
 .neighbor .libs { grid-column: 2; display: flex; gap: .4rem; flex-wrap: wrap; }
 .neighbor .libs:not(:empty) { margin-top: .45rem; }
-.neighbor .lib { font-size: .8rem; padding: .15rem .6rem; border: 1px solid var(--rule); border-radius: 999px; text-decoration: none; color: var(--ink); }
+.neighbor .lib { white-space: nowrap; font-size: .8rem; padding: .15rem .6rem; border: 1px solid var(--rule); border-radius: 999px; text-decoration: none; color: var(--ink); }
 .neighbor .lib:hover { border-color: var(--accent); }
 
 .badge {
@@ -268,6 +268,7 @@ a { color: var(--accent); }
 .neighbor .identicon { grid-row: span 4; }
 .neighbor .actions { grid-column: 3; }
 .neighbor .alarm { grid-column: 3; }
+.neighbor .libs { grid-column: 3; }
 
 /* ------------------------------------------------------- profile edit ----- */
 
