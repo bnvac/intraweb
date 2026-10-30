@@ -311,8 +311,11 @@ internet, and it does not need a router.
 - **A laptop or Pi.** `nmcli device wifi hotspot ssid intraweb password
   neighborhood` makes a network on Linux; the machine sharing it runs
   `intraweb up` like everyone else.
+- **Two laptops and a cable.** Plug Ethernet straight between them; both take
+  link-local addresses and find each other with no router or DHCP.
 - **A phone hotspot**, with mobile data off if you want to be sure nothing
-  leaves the room.
+  leaves the room. Windows and macOS hotspots usually want an internet
+  connection to share, so offline, use a Linux laptop, a Pi or the ESP32.
 - **Any old router** with no cable in the WAN port.
 
 Whichever you use, check client isolation is off, and run `intraweb doctor` if
