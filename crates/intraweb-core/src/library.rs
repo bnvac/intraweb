@@ -110,15 +110,161 @@ impl Library {
     /// Guess the kind from the service people usually mean by a port, so
     /// `intraweb library add Films 8096` needs no flag.
     pub fn kind_for_port(port: u16) -> &'static str {
-        match port {
-            8096 | 8920 | 32400 => "video", // Jellyfin, Plex
-            4533 | 4040 => "music",         // Navidrome, Airsonic
-            8083 | 5000 => "books",         // Calibre-Web, Kavita
-            2283 | 2342 => "photos",        // Immich, PhotoPrism
-            _ => "other",
-        }
+        KNOWN_SERVICES
+            .iter()
+            .find(|k| k.port == port)
+            .map_or("other", |k| k.kind)
     }
 }
+
+/// A self-hosted service people commonly run, and how to recognise it.
+///
+/// Detection asks the service for `probe` on its default port and looks for
+/// `marker` in what comes back. An open port alone proves nothing -- plenty of
+/// things listen on 8080 -- so a service is only offered once it has said its
+/// own name.
+#[derive(Debug, Clone, Copy)]
+pub struct KnownService {
+    pub name: &'static str,
+    pub port: u16,
+    /// Where its web interface starts, used for the link.
+    pub path: &'static str,
+    pub kind: &'static str,
+    /// What it holds, in a few words, for the dashboard.
+    pub what: &'static str,
+    /// A path that answers with the service's name in it.
+    pub probe: &'static str,
+    /// Lower-case text that only this service puts in that answer.
+    pub marker: &'static str,
+}
+
+const fn known(
+    name: &'static str,
+    port: u16,
+    path: &'static str,
+    kind: &'static str,
+    what: &'static str,
+    probe: &'static str,
+    marker: &'static str,
+) -> KnownService {
+    KnownService {
+        name,
+        port,
+        path,
+        kind,
+        what,
+        probe,
+        marker,
+    }
+}
+
+/// Services `intraweb library detect` looks for, on their default ports.
+/// Anything else can still be listed by hand with its port.
+pub const KNOWN_SERVICES: &[KnownService] = &[
+    known(
+        "Jellyfin",
+        8096,
+        "/",
+        "video",
+        "films and TV",
+        "/System/Info/Public",
+        "jellyfin",
+    ),
+    known(
+        "Plex",
+        32400,
+        "/web/",
+        "video",
+        "films and TV",
+        "/identity",
+        "machineidentifier",
+    ),
+    known(
+        "Navidrome",
+        4533,
+        "/",
+        "music",
+        "music",
+        "/app/",
+        "navidrome",
+    ),
+    known(
+        "Audiobookshelf",
+        13378,
+        "/",
+        "books",
+        "audiobooks and podcasts",
+        "/status",
+        "audiobookshelf",
+    ),
+    known(
+        "Calibre-Web",
+        8083,
+        "/",
+        "books",
+        "e-books",
+        "/login",
+        "calibre",
+    ),
+    known(
+        "Kavita",
+        5000,
+        "/",
+        "books",
+        "comics and e-books",
+        "/",
+        "kavita",
+    ),
+    known("Komga", 25600, "/", "books", "comics", "/", "komga"),
+    known(
+        "Immich",
+        2283,
+        "/",
+        "photos",
+        "photos and videos",
+        "/",
+        "immich",
+    ),
+    known(
+        "PhotoPrism",
+        2342,
+        "/",
+        "photos",
+        "photos",
+        "/",
+        "photoprism",
+    ),
+    known(
+        "Kiwix",
+        8080,
+        "/",
+        "other",
+        "offline Wikipedia and docs",
+        "/",
+        "kiwix",
+    ),
+    known(
+        "Home Assistant",
+        8123,
+        "/",
+        "other",
+        "home automation",
+        "/",
+        "home assistant",
+    ),
+    known(
+        "Paperless-ngx",
+        8000,
+        "/",
+        "other",
+        "scanned documents",
+        "/accounts/login/",
+        "paperless",
+    ),
+    known("Mealie", 9925, "/", "other", "recipes", "/", "mealie"),
+    known("Forgejo", 3000, "/", "other", "code", "/", "forgejo"),
+    known("Gitea", 3000, "/", "other", "code", "/", "gitea"),
+];
 
 /// Keep the good entries from an untrusted list and drop the rest, capped.
 pub fn sanitize_list(list: Vec<Library>) -> Vec<Library> {
@@ -196,6 +342,25 @@ mod tests {
         assert_eq!(Library::kind_for_port(8083), "books");
         assert_eq!(Library::kind_for_port(2283), "photos");
         assert_eq!(Library::kind_for_port(1234), "other");
+    }
+
+    #[test]
+    fn every_known_service_would_pass_its_own_check() {
+        for k in KNOWN_SERVICES {
+            let lib = Library::checked(k.name, k.port, k.path, k.kind).unwrap();
+            assert_eq!(
+                lib.kind, k.kind,
+                "{} has a kind the dashboard does not know",
+                k.name
+            );
+            assert!(k.probe.starts_with('/'), "{} probe must be a path", k.name);
+            assert_eq!(
+                k.marker,
+                k.marker.to_lowercase(),
+                "{} marker must be lower case",
+                k.name
+            );
+        }
     }
 
     #[test]

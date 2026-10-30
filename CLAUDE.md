@@ -196,6 +196,10 @@ key material independent.
     that node's own address. The URL is built from the address we reach the
     peer on, never taken from the list they send, and every entry goes
     through `Library::checked`, because the list comes from a stranger.
+    Detecting, adding and removing answer only to loopback: the API port is
+    the one neighbors reach, and a remote "what runs here" is a port scan.
+    Detection needs the service's own name in its answer, never just an
+    open port.
 
 ## Conventions
 

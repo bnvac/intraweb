@@ -18,7 +18,7 @@ use axum::routing::{get, post};
 use intraweb_core::SignedMail;
 use intraweb_core::channel::{ChannelId, Invite, SignedPost};
 use intraweb_core::identity::PeerId;
-use intraweb_core::library::{Library, MAX_LIBRARIES, sanitize_list};
+use intraweb_core::library::{KNOWN_SERVICES, Library, MAX_LIBRARIES, sanitize_list};
 use intraweb_core::net::{MotionKind, NetId};
 use intraweb_core::peer::now_secs;
 use intraweb_core::sealed::SealingKey;
@@ -171,6 +171,169 @@ async fn own_libraries(State(state): State<AppState>) -> impl IntoResponse {
         .map(|config| sanitize_list(config.libraries))
         .unwrap_or_default();
     axum::Json(libraries)
+}
+
+/// Changing what you list, and looking at what runs on this machine, are for
+/// the operator alone. A neighbor reaches the same port, and letting one probe
+/// our local services would hand out a port scan for free.
+fn from_this_machine(addr: SocketAddr) -> bool {
+    addr.ip().is_loopback()
+}
+
+/// Add a library to the vault's config, replacing one of the same name.
+pub fn add_library(vault: &Vault, library: Library) -> Result<()> {
+    let path = vault.config_path();
+    let mut config = Config::load_or_create(&path)?;
+    config
+        .libraries
+        .retain(|l| !l.name.eq_ignore_ascii_case(&library.name));
+    anyhow::ensure!(
+        config.libraries.len() < MAX_LIBRARIES,
+        "you already list {MAX_LIBRARIES} libraries; remove one first"
+    );
+    config.libraries.push(library);
+    config.save(&path)
+}
+
+/// Stop listing a library. Returns whether there was one by that name.
+pub fn remove_library(vault: &Vault, name: &str) -> Result<bool> {
+    let path = vault.config_path();
+    let mut config = Config::load_or_create(&path)?;
+    let before = config.libraries.len();
+    config
+        .libraries
+        .retain(|l| !l.name.eq_ignore_ascii_case(name));
+    if config.libraries.len() == before {
+        return Ok(false);
+    }
+    config.save(&path)?;
+    Ok(true)
+}
+
+/// A known service found running here.
+#[derive(Debug, Serialize)]
+pub struct Detected {
+    pub name: String,
+    pub port: u16,
+    pub path: String,
+    pub kind: String,
+    pub what: String,
+    /// Already in this node's list, so the dashboard offers no Add button.
+    pub listed: bool,
+}
+
+/// Ask each known service's default port for a page that carries its name.
+/// Probes run together with a short timeout, so a quiet machine answers in
+/// well under a second.
+pub async fn detect_local(listed: &[Library]) -> Vec<Detected> {
+    let mut probes = tokio::task::JoinSet::new();
+    for (index, known) in KNOWN_SERVICES.iter().enumerate() {
+        probes.spawn(async move {
+            let local = IpAddr::from([127, 0, 0, 1]);
+            let answer =
+                crate::http::get(local, known.port, known.probe, Duration::from_millis(700))
+                    .await
+                    .ok()?;
+            let text = format!(
+                "{} {}",
+                answer.body.to_lowercase(),
+                answer.header("server").unwrap_or_default().to_lowercase()
+            );
+            text.contains(known.marker).then_some(index)
+        });
+    }
+    let mut found: Vec<usize> = probes.join_all().await.into_iter().flatten().collect();
+    found.sort_unstable();
+    found
+        .into_iter()
+        .map(|i| {
+            let k = &KNOWN_SERVICES[i];
+            Detected {
+                name: k.name.to_string(),
+                port: k.port,
+                path: k.path.to_string(),
+                kind: k.kind.to_string(),
+                what: k.what.to_string(),
+                listed: listed.iter().any(|l| l.port == k.port),
+            }
+        })
+        .collect()
+}
+
+async fn detect_libraries(
+    State(state): State<AppState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
+    if !from_this_machine(addr) {
+        return (
+            StatusCode::FORBIDDEN,
+            "only this machine can look for its services",
+        )
+            .into_response();
+    }
+    let listed = Config::load_or_create(&state.vault.config_path())
+        .map(|c| c.libraries)
+        .unwrap_or_default();
+    axum::Json(detect_local(&listed).await).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct LibraryForm {
+    name: String,
+    port: u16,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    kind: String,
+}
+
+async fn add_library_route(
+    State(state): State<AppState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+    axum::Json(form): axum::Json<LibraryForm>,
+) -> impl IntoResponse {
+    if !from_this_machine(addr) {
+        return (
+            StatusCode::FORBIDDEN,
+            "only this machine can change its libraries",
+        )
+            .into_response();
+    }
+    let kind = if form.kind.is_empty() {
+        Library::kind_for_port(form.port).to_string()
+    } else {
+        form.kind
+    };
+    match Library::checked(&form.name, form.port, &form.path, &kind)
+        .and_then(|lib| add_library(&state.vault, lib))
+    {
+        Ok(()) => (StatusCode::OK, "listed").into_response(),
+        Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RemoveLibrary {
+    name: String,
+}
+
+async fn remove_library_route(
+    State(state): State<AppState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+    axum::Json(form): axum::Json<RemoveLibrary>,
+) -> impl IntoResponse {
+    if !from_this_machine(addr) {
+        return (
+            StatusCode::FORBIDDEN,
+            "only this machine can change its libraries",
+        )
+            .into_response();
+    }
+    match remove_library(&state.vault, &form.name) {
+        Ok(true) => (StatusCode::OK, "removed").into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no library by that name").into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
 }
 
 /// A library as the dashboard needs it: a label and where to point the browser.
@@ -1914,6 +2077,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/guestbook/{peer}", post(sign_guestbook))
         .route("/api/files", get(shared_files))
         .route("/api/libraries", get(own_libraries))
+        .route("/api/libraries/detect", get(detect_libraries))
+        .route("/api/libraries/add", post(add_library_route))
+        .route("/api/libraries/remove", post(remove_library_route))
         .route("/api/peers/{peer_id}/libraries", get(peer_libraries))
         .route("/api/contacts", get(contacts))
         .route("/api/hidden", post(set_hidden))
@@ -1999,7 +2165,44 @@ pub async fn bind(preferred_low_port: bool, port: u16) -> Result<(tokio::net::Tc
 
 #[cfg(test)]
 mod tests {
-    use super::{safe_site_name, should_try_low_port};
+
+    #[test]
+    fn only_this_machine_may_change_or_probe_its_libraries() {
+        assert!(from_this_machine(SocketAddr::from(([127, 0, 0, 1], 5000))));
+        assert!(from_this_machine("[::1]:5000".parse().unwrap()));
+        assert!(!from_this_machine(SocketAddr::from((
+            [192, 168, 1, 20],
+            5000
+        ))));
+    }
+
+    #[test]
+    fn adding_a_library_replaces_one_of_the_same_name_and_removing_reports_misses() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::new(dir.path());
+        vault.ensure().unwrap();
+        add_library(
+            &vault,
+            Library::checked("Films", 8096, "/", "video").unwrap(),
+        )
+        .unwrap();
+        add_library(
+            &vault,
+            Library::checked("films", 8920, "/", "video").unwrap(),
+        )
+        .unwrap();
+        let listed = Config::load_or_create(&vault.config_path())
+            .unwrap()
+            .libraries;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].port, 8920);
+        assert!(remove_library(&vault, "FILMS").unwrap());
+        assert!(!remove_library(&vault, "Films").unwrap());
+    }
+    use super::{
+        Config, Library, SocketAddr, Vault, add_library, from_this_machine, remove_library,
+        safe_site_name, should_try_low_port,
+    };
 
     #[test]
     fn a_plain_hub_takes_the_clean_url() {

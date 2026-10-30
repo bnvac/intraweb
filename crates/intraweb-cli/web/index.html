@@ -87,6 +87,33 @@
       </div>
     </section>
 
+    <section class="module" aria-labelledby="libraries-heading">
+      <h2 class="module-head" id="libraries-heading">
+        Media libraries <span class="module-meta" id="libraries-meta"></span>
+      </h2>
+      <div class="module-body">
+        <p class="aside-note">Jellyfin, Navidrome, Immich and the like, already
+           running here, shown as buttons on your card. Neighbors open them
+           straight from this machine; nothing streams through intraweb.</p>
+        <div id="my-libraries"></div>
+        <button id="detect-libraries" type="button" class="wide">Find services on this computer</button>
+        <div id="detected-libraries"></div>
+        <details class="lib-manual">
+          <summary>Add one by port</summary>
+          <form id="library-form" class="lib-form">
+            <input id="lib-name" name="name" placeholder="Name, e.g. Films" maxlength="40" required>
+            <input id="lib-port" name="port" type="number" min="1" max="65535" placeholder="Port" required>
+            <select id="lib-kind" name="kind" aria-label="Kind">
+              <option value="">kind: guess</option><option>video</option><option>music</option>
+              <option>books</option><option>photos</option><option>other</option>
+            </select>
+            <button type="submit">Add</button>
+          </form>
+        </details>
+        <span id="library-result" class="aside-note"></span>
+      </div>
+    </section>
+
     <section class="module" aria-labelledby="activity-heading">
       <h2 class="module-head" id="activity-heading">
         Activity <span class="module-meta" id="activity-meta"></span>

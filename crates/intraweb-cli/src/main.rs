@@ -187,6 +187,13 @@ enum LibraryCmd {
     },
     /// Show the libraries you list.
     List,
+    /// Look for Jellyfin, Navidrome, Immich and other services already
+    /// running here, recognised by name rather than just by an open port.
+    Detect {
+        /// List everything found instead of only printing it.
+        #[arg(long)]
+        add: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -297,7 +304,7 @@ async fn run() -> Result<()> {
         Command::Sign { peer, message } => sign_command(vault, &peer, &message.join(" ")).await,
         Command::Guestbook => guestbook_command(vault),
         Command::Channel { cmd } => channel_command(vault, cmd).await,
-        Command::Library { cmd } => library_command(vault, cmd),
+        Command::Library { cmd } => library_command(vault, cmd).await,
         Command::Libraries { peer } => libraries_command(vault, &peer).await,
         Command::Get { peer, file, output } => get_command(vault, &peer, &file, output).await,
         Command::Doctor { listen } => doctor(vault, listen).await,
@@ -1110,9 +1117,9 @@ fn blocked_command(vault: Vault) -> Result<()> {
     Ok(())
 }
 
-fn library_command(vault: Vault, cmd: LibraryCmd) -> Result<()> {
-    use intraweb_core::library::{Library, MAX_LIBRARIES};
-    let (_, mut config, _) = open_vault(&vault)?;
+async fn library_command(vault: Vault, cmd: LibraryCmd) -> Result<()> {
+    use intraweb_core::library::Library;
+    let (_, config, _) = open_vault(&vault)?;
     match cmd {
         LibraryCmd::Add {
             name,
@@ -1122,15 +1129,7 @@ fn library_command(vault: Vault, cmd: LibraryCmd) -> Result<()> {
         } => {
             let kind = kind.unwrap_or_else(|| Library::kind_for_port(port).to_string());
             let library = Library::checked(&name, port, &path, &kind)?;
-            config
-                .libraries
-                .retain(|l| !l.name.eq_ignore_ascii_case(&library.name));
-            anyhow::ensure!(
-                config.libraries.len() < MAX_LIBRARIES,
-                "you already list {MAX_LIBRARIES} libraries; remove one first"
-            );
-            config.libraries.push(library.clone());
-            config.save(&vault.config_path())?;
+            api::add_library(&vault, library.clone())?;
             println!(
                 "Listed {} ({}) on port {}, path {}.",
                 library.name, library.kind, library.port, library.path
@@ -1149,30 +1148,69 @@ fn library_command(vault: Vault, cmd: LibraryCmd) -> Result<()> {
             );
         }
         LibraryCmd::Remove { name } => {
-            let before = config.libraries.len();
-            config
-                .libraries
-                .retain(|l| !l.name.eq_ignore_ascii_case(&name));
             anyhow::ensure!(
-                config.libraries.len() < before,
+                api::remove_library(&vault, &name)?,
                 "you have no library called {name}; `intraweb library list` shows them"
             );
-            config.save(&vault.config_path())?;
             println!("Stopped listing {name}. The service itself is untouched.");
         }
         LibraryCmd::List => {
             if config.libraries.is_empty() {
-                println!("You list no libraries. Add one with: intraweb library add Films 8096");
+                println!("You list no libraries. Find running ones with: intraweb library detect");
             }
             for lib in &config.libraries {
                 println!(
-                    "  {:<20} {:<7} port {}{}",
+                    "  {:<20} {:<7} port {:<5}  path {}",
                     lib.name, lib.kind, lib.port, lib.path
                 );
             }
         }
+        LibraryCmd::Detect { add } => {
+            println!("Looking for self-hosted services on this machine...");
+            let found = api::detect_local(&config.libraries).await;
+            if found.is_empty() {
+                println!(
+                    "Found none of the services intraweb knows by name. List any other with: \
+                     intraweb library add <name> <port>"
+                );
+                return Ok(());
+            }
+            for d in &found {
+                let state = if d.listed {
+                    "already listed".to_string()
+                } else if add {
+                    match Library::checked(&d.name, d.port, &d.path, &d.kind)
+                        .and_then(|lib| api::add_library(&vault, lib))
+                    {
+                        Ok(()) => "listed now".to_string(),
+                        Err(err) => format!("not listed: {err}"),
+                    }
+                } else {
+                    format!("intraweb library add {} {}", shell_word(&d.name), d.port)
+                };
+                println!(
+                    "  {:<16} {:<26} port {:<5}  {state}",
+                    d.name, d.what, d.port
+                );
+            }
+            if !add && found.iter().any(|d| !d.listed) {
+                println!("\nList them all at once with: intraweb library detect --add");
+            }
+        }
     }
     Ok(())
+}
+
+/// Quote a name for a command the operator might paste.
+fn shell_word(word: &str) -> String {
+    if word
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    {
+        word.to_string()
+    } else {
+        format!("\"{word}\"")
+    }
 }
 
 async fn libraries_command(vault: Vault, query: &str) -> Result<()> {

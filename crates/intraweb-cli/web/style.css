@@ -489,3 +489,14 @@ textarea.editor {
 
 #footer-leader:not(:empty)::before { content: " \00b7 "; }
 #new-channel-net { font: inherit; font-size: .76rem; max-width: 12rem; }
+
+/* Your media libraries. */
+.lib-list { list-style: none; margin: .5rem 0; padding: 0; }
+.lib-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: .5rem; align-items: center; padding: .3rem 0; border-bottom: 1px solid var(--rule); font-size: .85rem; }
+.lib-list li small { display: block; color: var(--muted); font-size: .72rem; }
+.lib-list .mono { color: var(--muted); font-size: .75rem; }
+#detect-libraries { margin-top: .5rem; }
+.lib-manual { margin-top: .6rem; font-size: .85rem; }
+.lib-manual summary { cursor: pointer; color: var(--accent); }
+.lib-form { display: grid; grid-template-columns: minmax(0, 1fr) 5.5rem; gap: .4rem; margin-top: .5rem; }
+.lib-form select, .lib-form button { grid-column: span 1; }

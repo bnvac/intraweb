@@ -306,7 +306,9 @@ Already run Jellyfin, Navidrome, Calibre-Web or Immich? Point the
 neighborhood at it:
 
 ```sh
-intraweb library add Films 8096          # kind guessed from the port
+intraweb library detect                  # find services already running here
+intraweb library detect --add            # ...and list them all
+intraweb library add Films 8096          # anything else, by port
 intraweb library add Books 8083 --kind books
 intraweb library list
 intraweb libraries bob                   # what bob points at
@@ -318,6 +320,14 @@ machine, so the media never passes through intraweb or a hub, and it streams
 as fast as the two machines manage. The service has to listen on your network
 (not only on localhost) and your firewall has to allow its port; `library add`
 warns if nothing is answering yet.
+
+The dashboard has the same thing as a **Media libraries** box: *Find services
+on this computer*, then one click per service. Detection recognises a service
+by its own name on its own page, not by an open port, and knows Jellyfin,
+Plex, Navidrome, Audiobookshelf, Calibre-Web, Kavita, Komga, Immich,
+PhotoPrism, Kiwix, Home Assistant, Paperless-ngx, Mealie, Forgejo and Gitea.
+Listing, removing and detecting only answer to this machine; a neighbor asking
+gets a 403, so the dashboard's port is not a free port scan.
 
 A neighbor's list is checked before it is shown: names lose markup, a path
 can only be a path on that neighbor's own address, and nobody can list more

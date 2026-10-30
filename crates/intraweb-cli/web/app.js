@@ -317,6 +317,77 @@ function fillLibraries() {
   }
 }
 
+// ---- your own media libraries ------------------------------------------------
+
+let lastDetected = [];
+
+async function postLibrary(url, body) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  document.getElementById("library-result").textContent = response.ok ? "" : text;
+  return response.ok;
+}
+
+async function saveLibrary(library) {
+  if (await postLibrary("/api/libraries/add", library)) {
+    await loadLibraries();
+    if (lastDetected.length) renderDetected(await getJson("/api/libraries/detect"));
+  }
+}
+
+async function loadLibraries() {
+  let libs = [];
+  try {
+    libs = await getJson("/api/libraries");
+  } catch {
+    return;
+  }
+  document.getElementById("libraries-meta").textContent = libs.length ? `${libs.length} listed` : "";
+  document.getElementById("my-libraries").innerHTML = libs.length
+    ? `<ul class="lib-list">${libs
+        .map(
+          (l) => `<li><span>${LIBRARY_GLYPH[l.kind] || LIBRARY_GLYPH.other} ${escapeHtml(l.name)}</span>
+            <span class="mono">:${escapeHtml(String(l.port))}${escapeHtml(l.path === "/" ? "" : l.path)}</span>
+            <button type="button" class="quiet danger" data-lib-remove="${escapeHtml(l.name)}">Remove</button></li>`,
+        )
+        .join("")}</ul>`
+    : "";
+}
+
+function renderDetected(found) {
+  lastDetected = Array.isArray(found) ? found : [];
+  document.getElementById("detected-libraries").innerHTML = lastDetected.length
+    ? `<ul class="lib-list">${lastDetected
+        .map(
+          (d, i) => `<li><span>${LIBRARY_GLYPH[d.kind] || LIBRARY_GLYPH.other} ${escapeHtml(d.name)}
+              <small>${escapeHtml(d.what)}</small></span>
+            <span class="mono">:${escapeHtml(String(d.port))}</span>
+            ${d.listed ? '<span class="aside-note">listed</span>' : `<button type="button" data-lib-add="${i}">Add</button>`}</li>`,
+        )
+        .join("")}</ul>`
+    : '<p class="empty">None of the services intraweb knows by name are running here. Add any other by its port below.</p>';
+}
+
+document.getElementById("library-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.target;
+  const ok = await postLibrary("/api/libraries/add", {
+    name: form.name.value,
+    port: Number(form.port.value),
+    kind: form.kind.value,
+  });
+  if (ok) {
+    form.reset();
+    await loadLibraries();
+  }
+});
+
+loadLibraries();
+
 /// An attachment lives on the sender's node, so the link points there.
 /// Without their address there is nothing to link to, so say the name only.
 function attachmentLink(message, peers) {
@@ -554,6 +625,35 @@ document.addEventListener("click", async (event) => {
     verifyButton.disabled = true;
     await fetch(`/api/peers/${verifyButton.dataset.verify}/verify`, { method: "POST" });
     await refresh();
+    return;
+  }
+
+  if (event.target.id === "detect-libraries") {
+    const button = event.target;
+    button.disabled = true;
+    button.textContent = "Looking…";
+    try {
+      renderDetected(await getJson("/api/libraries/detect"));
+    } catch {
+      document.getElementById("detected-libraries").innerHTML =
+        '<p class="empty">Could not look. Is this the dashboard on this computer?</p>';
+    }
+    button.disabled = false;
+    button.textContent = "Look again";
+    return;
+  }
+
+  const addDetected = event.target.closest("[data-lib-add]");
+  if (addDetected) {
+    const found = lastDetected[Number(addDetected.dataset.libAdd)];
+    if (found) await saveLibrary({ name: found.name, port: found.port, path: found.path, kind: found.kind });
+    return;
+  }
+
+  const removeLibrary = event.target.closest("[data-lib-remove]");
+  if (removeLibrary) {
+    await postLibrary("/api/libraries/remove", { name: removeLibrary.dataset.libRemove });
+    await loadLibraries();
     return;
   }
 
