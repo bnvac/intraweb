@@ -92,9 +92,11 @@ intraweb doctor                    # why can't I see anyone?
 intraweb id                        # my fingerprint, for verifying in person
 ```
 
-Open the dashboard at `http://intranet.local` (or `http://localhost:8420` if no
-hub is running). It is plain HTML and JavaScript, and works on any phone on the
-network.
+Open the dashboard at `http://localhost:8420` (or `http://intranet.local` on
+the hub machine). It is plain HTML and JavaScript. Anyone else who opens your
+address -- a phone on the hub, say -- gets a visitor view: who is here and
+links to their pages. Your mail, channels and settings only answer to your own
+machine.
 
 ### Your vault
 

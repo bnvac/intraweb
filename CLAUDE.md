@@ -201,6 +201,15 @@ key material independent.
     Detection needs the service's own name in its answer, never just an
     open port.
 
+35. **The dashboard is the operator's; the port is everyone's.** The dashboard
+    and the peer protocol share one port, so anyone on the Wi-Fi could read
+    the inbox, send mail signed with our key and rewrite our page with
+    `curl` -- the cross-site check only stops browsers. `operator_only`
+    refuses every route not on `is_public`'s closed list unless the request
+    comes from this machine (loopback or one of its own addresses). A new
+    route is private until it is added to that list. (Demonstrated hole,
+    named regression tests.)
+
 ## Conventions
 
 - Comments explain *why*, especially where a line encodes a security decision

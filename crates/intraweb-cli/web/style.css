@@ -500,3 +500,10 @@ textarea.editor {
 .lib-manual summary { cursor: pointer; color: var(--accent); }
 .lib-form { display: grid; grid-template-columns: minmax(0, 1fr) 5.5rem; gap: .4rem; margin-top: .5rem; }
 .lib-form select, .lib-form button { grid-column: span 1; }
+
+/* A visitor sees who is here and nothing that belongs to this node's owner. */
+body.visitor .module:not(.visitor-ok),
+body.visitor .column-side,
+body.visitor .neighbor .actions button { display: none; }
+body.visitor .column-main { grid-column: 1 / -1; }
+.visitor-banner { margin: 0 0 1rem; padding: .7rem .9rem; border: 1px solid var(--accent); border-radius: 3px; background: var(--module); font-size: .9rem; }

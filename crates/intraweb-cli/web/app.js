@@ -580,10 +580,38 @@ async function refreshChannel(options) {
   }
 }
 
+// Someone opening another machine's dashboard -- a phone on the hub's
+// address, say -- is a visitor. The node refuses them everything private, so
+// show who is here and where their pages are, and say how to join properly.
+async function refreshAsVisitor() {
+  const [status, peers] = await Promise.all([getJson("/api/status"), getJson("/api/peers")]);
+  document.body.classList.add("visitor");
+  const banner = document.getElementById("visitor-banner");
+  banner.hidden = false;
+  banner.innerHTML = `You are visiting <b>${escapeHtml(status.nickname)}</b>'s node. You can see who is here
+    and open their pages. To send mail, chat or share your own page, run intraweb on your own device.`;
+  lastStatus = status;
+  lastPeers = peers;
+  nodeReachable = true;
+  renderRosters(peers, status);
+  document.querySelector(".presence").classList.add("live");
+  text("presence-text", `visiting ${status.nickname}`);
+}
+
 async function refresh() {
   try {
+    if (document.body.classList.contains("visitor")) {
+      await refreshAsVisitor();
+      return;
+    }
     // One request: status, roster and mail are always rendered together.
-    const state = await getJson("/api/state");
+    const probe = await fetch("/api/state", { cache: "no-store" });
+    if (probe.status === 403) {
+      await refreshAsVisitor();
+      return;
+    }
+    if (!probe.ok) throw new Error(`/api/state responded ${probe.status}`);
+    const state = await probe.json();
     lastStatus = state.status;
     lastPeers = state.peers;
     nodeReachable = true;

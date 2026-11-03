@@ -177,7 +177,7 @@ async fn own_libraries(State(state): State<AppState>) -> impl IntoResponse {
 /// the operator alone. A neighbor reaches the same port, and letting one probe
 /// our local services would hand out a port scan for free.
 fn from_this_machine(addr: SocketAddr) -> bool {
-    addr.ip().is_loopback()
+    is_this_machine(addr.ip())
 }
 
 /// Add a library to the vault's config, replacing one of the same name.
@@ -2125,7 +2125,83 @@ pub fn router(state: AppState) -> Router {
         .nest_service(&format!("/~{nickname}"), site)
         .nest_service("/files", files)
         .layer(middleware::from_fn(refuse_cross_site_writes))
+        .layer(middleware::from_fn(operator_only))
         .layer(middleware::from_fn(count_neighbor_traffic))
+}
+
+/// What a neighbor may ask this node for. Everything else is the operator's.
+///
+/// The dashboard and the peer protocol share one port, so before this existed
+/// anyone on the Wi-Fi could read the inbox, send mail signed with this node's
+/// key and overwrite its page with plain `curl` -- the cross-site check only
+/// stops browsers. The list is closed on purpose: a new route is private until
+/// it is added here.
+pub fn is_public(method: &Method, path: &str) -> bool {
+    let read = method == Method::GET || method == Method::HEAD;
+    if read {
+        // Pages and shared files are published to everyone by definition.
+        if path.starts_with("/~") || path.starts_with("/files/") || path.starts_with("/identicon/")
+        {
+            return true;
+        }
+        // Backfill serves posts that were already sent to everyone in range;
+        // a private channel's posts are sealed, so its backfill leaks nothing.
+        if let Some(rest) = path.strip_prefix("/api/channels/")
+            && rest.ends_with("/backfill")
+            && rest.matches('/').count() == 1
+        {
+            return true;
+        }
+        return matches!(
+            path,
+            // The dashboard shell, so a phone on the hub gets the visitor view.
+            "/" | "/style.css"
+                | "/app.js"
+                | "/avatar"
+                // Who is here and how to reach them: already announced openly.
+                | "/api/status"
+                | "/api/peers"
+                | "/api/hubs"
+                | "/api/files"
+                | "/api/libraries"
+        );
+    }
+    // Deliveries from other nodes. Each carries its own signature, which the
+    // handler checks before anything is stored.
+    method == Method::POST
+        && matches!(
+            path,
+            "/api/mail" | "/api/channels/post" | "/api/channels/invite"
+        )
+}
+
+/// Whether a request comes from the machine this node runs on: loopback, or
+/// one of this machine's own addresses -- a hub operator opening
+/// `intranet.local` on the hub itself arrives from its LAN address.
+fn is_this_machine(ip: IpAddr) -> bool {
+    let ip = ip.to_canonical();
+    ip.is_loopback() || intraweb_net::beacon::local_addresses().contains(&ip)
+}
+
+async fn operator_only(request: Request, next: Next) -> axum::response::Response {
+    let from = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip());
+    // No connection info means an in-process caller (tests), not the network.
+    let allowed = match from {
+        None => true,
+        Some(ip) => is_this_machine(ip) || is_public(request.method(), request.uri().path()),
+    };
+    if allowed {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::FORBIDDEN,
+            "That is for the person at this computer. Run intraweb on your own device to use it.",
+        )
+            .into_response()
+    }
 }
 
 /// Whether to try the clean, port-free URL.
@@ -2165,6 +2241,139 @@ pub async fn bind(preferred_low_port: bool, port: u16) -> Result<(tokio::net::Tc
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn regression_a_neighbor_could_read_mail_send_as_us_and_rewrite_our_page() {
+        use super::{Method, is_public};
+        // Demonstrated with curl from another machine on the Wi-Fi: every one
+        // of these answered 200 before operator_only existed.
+        for (method, path) in [
+            (Method::GET, "/api/mail"),
+            (Method::GET, "/api/state"),
+            (Method::GET, "/api/contacts"),
+            (Method::POST, "/api/mail/send"),
+            (Method::POST, "/api/site"),
+            (Method::POST, "/api/profile"),
+            (Method::POST, "/api/hidden"),
+            (Method::GET, "/api/channels/abcd/posts"),
+            (Method::POST, "/api/channels/abcd/say"),
+            (Method::POST, "/api/peers/abcd/block"),
+            (Method::POST, "/api/nets/new"),
+            (Method::GET, "/api/libraries/detect"),
+            (Method::POST, "/api/files/x.txt"),
+            (Method::GET, "/api/channels/abcd/backfill/extra"),
+        ] {
+            assert!(
+                !is_public(&method, path),
+                "{method} {path} must be operator-only"
+            );
+        }
+    }
+
+    /// The real router, with a request that arrives from `from`.
+    async fn ask(
+        state: super::AppState,
+        method: super::Method,
+        path: &str,
+        from: [u8; 4],
+    ) -> axum::http::StatusCode {
+        use tower::ServiceExt;
+        let mut request = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"to":"bob","body":"x"}"#))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(SocketAddr::from((from, 50000))));
+        super::router(state)
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status()
+    }
+
+    fn test_state(dir: &std::path::Path) -> super::AppState {
+        use intraweb_core::{Identity, Store};
+        use std::sync::{Arc, Mutex};
+        let vault = Vault::new(dir);
+        vault.ensure().unwrap();
+        let (identity, _) = Identity::load_or_create(&vault.identity_path()).unwrap();
+        let config = Config::load_or_create(&vault.config_path()).unwrap();
+        super::AppState {
+            roster: intraweb_net::Roster::empty(identity.peer_id()),
+            identity: Arc::new(identity),
+            store: Arc::new(Mutex::new(Store::open(&vault.db_path()).unwrap())),
+            site_dir: vault.site_dir(),
+            config: Arc::new(config),
+            vault: Arc::new(vault),
+            started_at: 0,
+            limiter: Arc::new(crate::limits::RateLimiter::new(crate::limits::now_float())),
+            node: None,
+            low_data: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    #[tokio::test]
+    async fn regression_a_neighbor_is_refused_the_operators_routes_end_to_end() {
+        use super::Method;
+        use axum::http::StatusCode;
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        // A documentation address: never one of this machine's own.
+        let neighbor = [203, 0, 113, 9];
+        for (method, path) in [
+            (Method::GET, "/api/mail"),
+            (Method::GET, "/api/state"),
+            (Method::POST, "/api/mail/send"),
+            (Method::POST, "/api/site"),
+        ] {
+            assert_eq!(
+                ask(state.clone(), method.clone(), path, neighbor).await,
+                StatusCode::FORBIDDEN,
+                "{method} {path} answered a neighbor"
+            );
+        }
+        // The same routes still answer the operator.
+        assert_eq!(
+            ask(state.clone(), Method::GET, "/api/mail", [127, 0, 0, 1]).await,
+            StatusCode::OK
+        );
+        // And what neighbors are meant to reach is not caught by the guard.
+        assert_eq!(
+            ask(state.clone(), Method::GET, "/api/peers", neighbor).await,
+            StatusCode::OK
+        );
+        assert_ne!(
+            ask(state, Method::POST, "/api/mail", neighbor).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn what_other_nodes_and_visitors_need_stays_reachable() {
+        use super::{Method, is_public};
+        for (method, path) in [
+            (Method::POST, "/api/mail"),
+            (Method::POST, "/api/channels/post"),
+            (Method::POST, "/api/channels/invite"),
+            (Method::GET, "/api/channels/abcd/backfill"),
+            (Method::GET, "/api/files"),
+            (Method::GET, "/api/libraries"),
+            (Method::GET, "/api/peers"),
+            (Method::GET, "/avatar"),
+            (Method::GET, "/identicon/abcd.svg"),
+            (Method::GET, "/~ben/"),
+            (Method::GET, "/files/maps/ridge.pdf"),
+            (Method::HEAD, "/files/maps/ridge.pdf"),
+            (Method::GET, "/"),
+        ] {
+            assert!(is_public(&method, path), "{method} {path} must stay public");
+        }
+        // Reading a public page is not the same as writing to it.
+        assert!(!is_public(&Method::POST, "/~ben/"));
+    }
 
     #[test]
     fn only_this_machine_may_change_or_probe_its_libraries() {
