@@ -29,3 +29,5 @@ mime_guess = "2"
 
 [dev-dependencies]
 tempfile = "3"
+# oneshot() drives the real router in tests, with a chosen peer address.
+tower = { version = "0.5", features = ["util"] }

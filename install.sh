@@ -10,7 +10,7 @@
 # Needs the internet exactly once. intraweb itself never does.
 set -eu
 
-REPO="2008wbbv/intraweb"
+REPO="bnvac/intraweb"
 BIN="intraweb"
 PREFIX="${PREFIX:-$HOME/.local/bin}"
 

@@ -18,13 +18,14 @@ use axum::routing::{get, post};
 use intraweb_core::SignedMail;
 use intraweb_core::channel::{ChannelId, Invite, SignedPost};
 use intraweb_core::identity::PeerId;
+use intraweb_core::library::{KNOWN_SERVICES, Library, MAX_LIBRARIES, sanitize_list};
 use intraweb_core::net::{MotionKind, NetId};
 use intraweb_core::peer::now_secs;
 use intraweb_core::sealed::SealingKey;
 use intraweb_core::{Config, Identity, Store, Vault};
 use intraweb_net::Roster;
 use serde::Serialize;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -161,6 +162,245 @@ async fn verify_peer(
         )
             .into_response(),
     }
+}
+
+/// The media libraries this node points neighbors at. Read from the config on
+/// each request, so `intraweb library add` shows up without a restart.
+async fn own_libraries(State(state): State<AppState>) -> impl IntoResponse {
+    let libraries = Config::load_or_create(&state.vault.config_path())
+        .map(|config| sanitize_list(config.libraries))
+        .unwrap_or_default();
+    axum::Json(libraries)
+}
+
+/// Changing what you list, and looking at what runs on this machine, are for
+/// the operator alone. A neighbor reaches the same port, and letting one probe
+/// our local services would hand out a port scan for free.
+fn from_this_machine(addr: SocketAddr) -> bool {
+    is_this_machine(addr.ip())
+}
+
+/// Add a library to the vault's config, replacing one of the same name.
+pub fn add_library(vault: &Vault, library: Library) -> Result<()> {
+    let path = vault.config_path();
+    let mut config = Config::load_or_create(&path)?;
+    config
+        .libraries
+        .retain(|l| !l.name.eq_ignore_ascii_case(&library.name));
+    anyhow::ensure!(
+        config.libraries.len() < MAX_LIBRARIES,
+        "you already list {MAX_LIBRARIES} libraries; remove one first"
+    );
+    config.libraries.push(library);
+    config.save(&path)
+}
+
+/// Stop listing a library. Returns whether there was one by that name.
+pub fn remove_library(vault: &Vault, name: &str) -> Result<bool> {
+    let path = vault.config_path();
+    let mut config = Config::load_or_create(&path)?;
+    let before = config.libraries.len();
+    config
+        .libraries
+        .retain(|l| !l.name.eq_ignore_ascii_case(name));
+    if config.libraries.len() == before {
+        return Ok(false);
+    }
+    config.save(&path)?;
+    Ok(true)
+}
+
+/// A known service found running here.
+#[derive(Debug, Serialize)]
+pub struct Detected {
+    pub name: String,
+    pub port: u16,
+    pub path: String,
+    pub kind: String,
+    pub what: String,
+    /// Already in this node's list, so the dashboard offers no Add button.
+    pub listed: bool,
+}
+
+/// Ask each known service's default port for a page that carries its name.
+/// Probes run together with a short timeout, so a quiet machine answers in
+/// well under a second.
+pub async fn detect_local(listed: &[Library]) -> Vec<Detected> {
+    let mut probes = tokio::task::JoinSet::new();
+    for (index, known) in KNOWN_SERVICES.iter().enumerate() {
+        probes.spawn(async move {
+            let local = IpAddr::from([127, 0, 0, 1]);
+            let answer =
+                crate::http::get(local, known.port, known.probe, Duration::from_millis(700))
+                    .await
+                    .ok()?;
+            let text = format!(
+                "{} {}",
+                answer.body.to_lowercase(),
+                answer.header("server").unwrap_or_default().to_lowercase()
+            );
+            text.contains(known.marker).then_some(index)
+        });
+    }
+    let mut found: Vec<usize> = probes.join_all().await.into_iter().flatten().collect();
+    found.sort_unstable();
+    found
+        .into_iter()
+        .map(|i| {
+            let k = &KNOWN_SERVICES[i];
+            Detected {
+                name: k.name.to_string(),
+                port: k.port,
+                path: k.path.to_string(),
+                kind: k.kind.to_string(),
+                what: k.what.to_string(),
+                listed: listed.iter().any(|l| l.port == k.port),
+            }
+        })
+        .collect()
+}
+
+async fn detect_libraries(
+    State(state): State<AppState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
+    if !from_this_machine(addr) {
+        return (
+            StatusCode::FORBIDDEN,
+            "only this machine can look for its services",
+        )
+            .into_response();
+    }
+    let listed = Config::load_or_create(&state.vault.config_path())
+        .map(|c| c.libraries)
+        .unwrap_or_default();
+    axum::Json(detect_local(&listed).await).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct LibraryForm {
+    name: String,
+    port: u16,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    kind: String,
+}
+
+async fn add_library_route(
+    State(state): State<AppState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+    axum::Json(form): axum::Json<LibraryForm>,
+) -> impl IntoResponse {
+    if !from_this_machine(addr) {
+        return (
+            StatusCode::FORBIDDEN,
+            "only this machine can change its libraries",
+        )
+            .into_response();
+    }
+    let kind = if form.kind.is_empty() {
+        Library::kind_for_port(form.port).to_string()
+    } else {
+        form.kind
+    };
+    match Library::checked(&form.name, form.port, &form.path, &kind)
+        .and_then(|lib| add_library(&state.vault, lib))
+    {
+        Ok(()) => (StatusCode::OK, "listed").into_response(),
+        Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RemoveLibrary {
+    name: String,
+}
+
+async fn remove_library_route(
+    State(state): State<AppState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+    axum::Json(form): axum::Json<RemoveLibrary>,
+) -> impl IntoResponse {
+    if !from_this_machine(addr) {
+        return (
+            StatusCode::FORBIDDEN,
+            "only this machine can change its libraries",
+        )
+            .into_response();
+    }
+    match remove_library(&state.vault, &form.name) {
+        Ok(true) => (StatusCode::OK, "removed").into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no library by that name").into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+/// A library as the dashboard needs it: a label and where to point the browser.
+#[derive(Debug, Serialize)]
+pub struct LibraryLink {
+    pub name: String,
+    pub kind: String,
+    pub url: String,
+}
+
+/// A neighbor's libraries, asked of their node directly. The list comes from a
+/// stranger, so every entry is re-checked before the dashboard sees it.
+async fn peer_libraries(
+    State(state): State<AppState>,
+    Path(peer_hex): Path<String>,
+) -> impl IntoResponse {
+    let Some(peer_id) = PeerId::parse_hex(&peer_hex) else {
+        return (StatusCode::BAD_REQUEST, "not a valid peer id").into_response();
+    };
+    let Some(peer) = state
+        .roster
+        .peers()
+        .into_iter()
+        .find(|p| p.peer_id == peer_id)
+    else {
+        return (StatusCode::NOT_FOUND, "that neighbor is not in range").into_response();
+    };
+    let Some(addr) = peer.preferred_addr() else {
+        return (StatusCode::NOT_FOUND, "that neighbor has no address yet").into_response();
+    };
+    // A neighbor that does not answer simply has no libraries to show.
+    let links = fetch_libraries(addr, peer.api_port)
+        .await
+        .unwrap_or_default();
+    axum::Json(links).into_response()
+}
+
+/// Ask a node for its libraries and turn each into a link on that node's own
+/// address. The URL is built here from the address we already reach them on,
+/// never taken from the sender, so a list cannot point the browser elsewhere.
+pub async fn fetch_libraries(addr: IpAddr, api_port: u16) -> Result<Vec<LibraryLink>> {
+    let response =
+        crate::http::get(addr, api_port, "/api/libraries", Duration::from_secs(4)).await?;
+    anyhow::ensure!(
+        response.is_success(),
+        "they answered HTTP {}",
+        response.status
+    );
+    let raw: Vec<serde_json::Value> =
+        serde_json::from_str(&response.body).context("they sent a list we could not read")?;
+    let host = crate::http::host_for(addr);
+    Ok(raw
+        .iter()
+        .filter_map(|v| {
+            let name = v.get("name")?.as_str()?;
+            let port = u16::try_from(v.get("port")?.as_u64()?).ok()?;
+            let path = v.get("path").and_then(|p| p.as_str()).unwrap_or("/");
+            let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("other");
+            Library::checked(name, port, path, kind).ok()
+        })
+        .take(MAX_LIBRARIES)
+        .map(|lib| LibraryLink {
+            url: format!("http://{host}:{}{}", lib.port, lib.path),
+            name: lib.name,
+            kind: lib.kind,
+        })
+        .collect())
 }
 
 /// Refuse to see or hear from a key from now on.
@@ -1836,6 +2076,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/guestbook", get(read_guestbook))
         .route("/api/guestbook/{peer}", post(sign_guestbook))
         .route("/api/files", get(shared_files))
+        .route("/api/libraries", get(own_libraries))
+        .route("/api/libraries/detect", get(detect_libraries))
+        .route("/api/libraries/add", post(add_library_route))
+        .route("/api/libraries/remove", post(remove_library_route))
+        .route("/api/peers/{peer_id}/libraries", get(peer_libraries))
         .route("/api/contacts", get(contacts))
         .route("/api/hidden", post(set_hidden))
         .route("/api/activity", get(activity))
@@ -1880,7 +2125,83 @@ pub fn router(state: AppState) -> Router {
         .nest_service(&format!("/~{nickname}"), site)
         .nest_service("/files", files)
         .layer(middleware::from_fn(refuse_cross_site_writes))
+        .layer(middleware::from_fn(operator_only))
         .layer(middleware::from_fn(count_neighbor_traffic))
+}
+
+/// What a neighbor may ask this node for. Everything else is the operator's.
+///
+/// The dashboard and the peer protocol share one port, so before this existed
+/// anyone on the Wi-Fi could read the inbox, send mail signed with this node's
+/// key and overwrite its page with plain `curl` -- the cross-site check only
+/// stops browsers. The list is closed on purpose: a new route is private until
+/// it is added here.
+pub fn is_public(method: &Method, path: &str) -> bool {
+    let read = method == Method::GET || method == Method::HEAD;
+    if read {
+        // Pages and shared files are published to everyone by definition.
+        if path.starts_with("/~") || path.starts_with("/files/") || path.starts_with("/identicon/")
+        {
+            return true;
+        }
+        // Backfill serves posts that were already sent to everyone in range;
+        // a private channel's posts are sealed, so its backfill leaks nothing.
+        if let Some(rest) = path.strip_prefix("/api/channels/")
+            && rest.ends_with("/backfill")
+            && rest.matches('/').count() == 1
+        {
+            return true;
+        }
+        return matches!(
+            path,
+            // The dashboard shell, so a phone on the hub gets the visitor view.
+            "/" | "/style.css"
+                | "/app.js"
+                | "/avatar"
+                // Who is here and how to reach them: already announced openly.
+                | "/api/status"
+                | "/api/peers"
+                | "/api/hubs"
+                | "/api/files"
+                | "/api/libraries"
+        );
+    }
+    // Deliveries from other nodes. Each carries its own signature, which the
+    // handler checks before anything is stored.
+    method == Method::POST
+        && matches!(
+            path,
+            "/api/mail" | "/api/channels/post" | "/api/channels/invite"
+        )
+}
+
+/// Whether a request comes from the machine this node runs on: loopback, or
+/// one of this machine's own addresses -- a hub operator opening
+/// `intranet.local` on the hub itself arrives from its LAN address.
+fn is_this_machine(ip: IpAddr) -> bool {
+    let ip = ip.to_canonical();
+    ip.is_loopback() || intraweb_net::beacon::local_addresses().contains(&ip)
+}
+
+async fn operator_only(request: Request, next: Next) -> axum::response::Response {
+    let from = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip());
+    // No connection info means an in-process caller (tests), not the network.
+    let allowed = match from {
+        None => true,
+        Some(ip) => is_this_machine(ip) || is_public(request.method(), request.uri().path()),
+    };
+    if allowed {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::FORBIDDEN,
+            "That is for the person at this computer. Run intraweb on your own device to use it.",
+        )
+            .into_response()
+    }
 }
 
 /// Whether to try the clean, port-free URL.
@@ -1920,7 +2241,177 @@ pub async fn bind(preferred_low_port: bool, port: u16) -> Result<(tokio::net::Tc
 
 #[cfg(test)]
 mod tests {
-    use super::{safe_site_name, should_try_low_port};
+
+    #[test]
+    fn regression_a_neighbor_could_read_mail_send_as_us_and_rewrite_our_page() {
+        use super::{Method, is_public};
+        // Demonstrated with curl from another machine on the Wi-Fi: every one
+        // of these answered 200 before operator_only existed.
+        for (method, path) in [
+            (Method::GET, "/api/mail"),
+            (Method::GET, "/api/state"),
+            (Method::GET, "/api/contacts"),
+            (Method::POST, "/api/mail/send"),
+            (Method::POST, "/api/site"),
+            (Method::POST, "/api/profile"),
+            (Method::POST, "/api/hidden"),
+            (Method::GET, "/api/channels/abcd/posts"),
+            (Method::POST, "/api/channels/abcd/say"),
+            (Method::POST, "/api/peers/abcd/block"),
+            (Method::POST, "/api/nets/new"),
+            (Method::GET, "/api/libraries/detect"),
+            (Method::POST, "/api/files/x.txt"),
+            (Method::GET, "/api/channels/abcd/backfill/extra"),
+        ] {
+            assert!(
+                !is_public(&method, path),
+                "{method} {path} must be operator-only"
+            );
+        }
+    }
+
+    /// The real router, with a request that arrives from `from`.
+    async fn ask(
+        state: super::AppState,
+        method: super::Method,
+        path: &str,
+        from: [u8; 4],
+    ) -> axum::http::StatusCode {
+        use tower::ServiceExt;
+        let mut request = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"to":"bob","body":"x"}"#))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(SocketAddr::from((from, 50000))));
+        super::router(state)
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status()
+    }
+
+    fn test_state(dir: &std::path::Path) -> super::AppState {
+        use intraweb_core::{Identity, Store};
+        use std::sync::{Arc, Mutex};
+        let vault = Vault::new(dir);
+        vault.ensure().unwrap();
+        let (identity, _) = Identity::load_or_create(&vault.identity_path()).unwrap();
+        let config = Config::load_or_create(&vault.config_path()).unwrap();
+        super::AppState {
+            roster: intraweb_net::Roster::empty(identity.peer_id()),
+            identity: Arc::new(identity),
+            store: Arc::new(Mutex::new(Store::open(&vault.db_path()).unwrap())),
+            site_dir: vault.site_dir(),
+            config: Arc::new(config),
+            vault: Arc::new(vault),
+            started_at: 0,
+            limiter: Arc::new(crate::limits::RateLimiter::new(crate::limits::now_float())),
+            node: None,
+            low_data: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    #[tokio::test]
+    async fn regression_a_neighbor_is_refused_the_operators_routes_end_to_end() {
+        use super::Method;
+        use axum::http::StatusCode;
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        // A documentation address: never one of this machine's own.
+        let neighbor = [203, 0, 113, 9];
+        for (method, path) in [
+            (Method::GET, "/api/mail"),
+            (Method::GET, "/api/state"),
+            (Method::POST, "/api/mail/send"),
+            (Method::POST, "/api/site"),
+        ] {
+            assert_eq!(
+                ask(state.clone(), method.clone(), path, neighbor).await,
+                StatusCode::FORBIDDEN,
+                "{method} {path} answered a neighbor"
+            );
+        }
+        // The same routes still answer the operator.
+        assert_eq!(
+            ask(state.clone(), Method::GET, "/api/mail", [127, 0, 0, 1]).await,
+            StatusCode::OK
+        );
+        // And what neighbors are meant to reach is not caught by the guard.
+        assert_eq!(
+            ask(state.clone(), Method::GET, "/api/peers", neighbor).await,
+            StatusCode::OK
+        );
+        assert_ne!(
+            ask(state, Method::POST, "/api/mail", neighbor).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn what_other_nodes_and_visitors_need_stays_reachable() {
+        use super::{Method, is_public};
+        for (method, path) in [
+            (Method::POST, "/api/mail"),
+            (Method::POST, "/api/channels/post"),
+            (Method::POST, "/api/channels/invite"),
+            (Method::GET, "/api/channels/abcd/backfill"),
+            (Method::GET, "/api/files"),
+            (Method::GET, "/api/libraries"),
+            (Method::GET, "/api/peers"),
+            (Method::GET, "/avatar"),
+            (Method::GET, "/identicon/abcd.svg"),
+            (Method::GET, "/~ben/"),
+            (Method::GET, "/files/maps/ridge.pdf"),
+            (Method::HEAD, "/files/maps/ridge.pdf"),
+            (Method::GET, "/"),
+        ] {
+            assert!(is_public(&method, path), "{method} {path} must stay public");
+        }
+        // Reading a public page is not the same as writing to it.
+        assert!(!is_public(&Method::POST, "/~ben/"));
+    }
+
+    #[test]
+    fn only_this_machine_may_change_or_probe_its_libraries() {
+        assert!(from_this_machine(SocketAddr::from(([127, 0, 0, 1], 5000))));
+        assert!(from_this_machine("[::1]:5000".parse().unwrap()));
+        assert!(!from_this_machine(SocketAddr::from((
+            [192, 168, 1, 20],
+            5000
+        ))));
+    }
+
+    #[test]
+    fn adding_a_library_replaces_one_of_the_same_name_and_removing_reports_misses() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::new(dir.path());
+        vault.ensure().unwrap();
+        add_library(
+            &vault,
+            Library::checked("Films", 8096, "/", "video").unwrap(),
+        )
+        .unwrap();
+        add_library(
+            &vault,
+            Library::checked("films", 8920, "/", "video").unwrap(),
+        )
+        .unwrap();
+        let listed = Config::load_or_create(&vault.config_path())
+            .unwrap()
+            .libraries;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].port, 8920);
+        assert!(remove_library(&vault, "FILMS").unwrap());
+        assert!(!remove_library(&vault, "Films").unwrap());
+    }
+    use super::{
+        Config, Library, SocketAddr, Vault, add_library, from_this_machine, remove_library,
+        safe_site_name, should_try_low_port,
+    };
 
     #[test]
     fn a_plain_hub_takes_the_clean_url() {

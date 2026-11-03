@@ -191,6 +191,24 @@ key material independent.
     in advance still do, and the dashboard says so. Do not claim more.
 33. **A net id proves its founder.** It is derived from the founder's key and
     a nonce, so a copied charter founds nothing.
+34. **A library is a link, not a relay.** `intraweb library` lists a media
+    service the node already runs; neighbors get a button that opens it on
+    that node's own address. The URL is built from the address we reach the
+    peer on, never taken from the list they send, and every entry goes
+    through `Library::checked`, because the list comes from a stranger.
+    Detecting, adding and removing answer only to loopback: the API port is
+    the one neighbors reach, and a remote "what runs here" is a port scan.
+    Detection needs the service's own name in its answer, never just an
+    open port.
+
+35. **The dashboard is the operator's; the port is everyone's.** The dashboard
+    and the peer protocol share one port, so anyone on the Wi-Fi could read
+    the inbox, send mail signed with our key and rewrite our page with
+    `curl` -- the cross-site check only stops browsers. `operator_only`
+    refuses every route not on `is_public`'s closed list unless the request
+    comes from this machine (loopback or one of its own addresses). A new
+    route is private until it is added to that list. (Demonstrated hole,
+    named regression tests.)
 
 ## Conventions
 

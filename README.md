@@ -12,6 +12,20 @@ intraweb up
 
 That is the whole setup. Nodes find each other in about a second.
 
+![Three nodes finding each other and chatting, recorded from the real dashboard](docs/demo.gif)
+
+### Try it in 60 seconds
+
+Two nodes on one machine, no network setup:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bnvac/intraweb/HEAD/install.sh | sh
+INTRAWEB_VAULT=/tmp/a intraweb up --hub --nickname alice --port 8480 &
+INTRAWEB_VAULT=/tmp/b intraweb up --nickname bob --port 8481 &
+# open http://localhost:8480 -- bob appears within a couple of seconds
+INTRAWEB_VAULT=/tmp/b intraweb say "hello from bob"
+```
+
 ## The idea
 
 Most "local network" software makes one machine the server and everybody else a
@@ -36,7 +50,7 @@ your data lives on somebody's instance.
 Single static binary, no runtime dependencies:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/2008wbbv/intraweb/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/bnvac/intraweb/HEAD/install.sh | sh
 ```
 
 That fetches a prebuilt binary if one exists for your machine. If it does not,
@@ -61,7 +75,7 @@ xcode-select --install                    # macOS
 Then:
 
 ```sh
-git clone https://github.com/2008wbbv/intraweb.git
+git clone https://github.com/bnvac/intraweb.git
 cd intraweb
 sh install.sh          # builds and installs to ~/.local/bin
 # or: cargo build --release   → target/release/intraweb
@@ -92,9 +106,11 @@ intraweb doctor                    # why can't I see anyone?
 intraweb id                        # my fingerprint, for verifying in person
 ```
 
-Open the dashboard at `http://intranet.local` (or `http://localhost:8420` if no
-hub is running). It is plain HTML and JavaScript, and works on any phone on the
-network.
+Open the dashboard at `http://localhost:8420` (or `http://intranet.local` on
+the hub machine). It is plain HTML and JavaScript. Anyone else who opens your
+address -- a phone on the hub, say -- gets a visitor view: who is here and
+links to their pages. Your mail, channels and settings only answer to your own
+machine.
 
 ### Your vault
 
@@ -299,6 +315,60 @@ intraweb doctor
 It listens on both discovery paths and tells you which one is working. intraweb
 announces over **mDNS** and **UDP broadcast** at the same time precisely because
 so many networks quietly break one of them.
+
+## Media libraries
+
+Already run Jellyfin, Navidrome, Calibre-Web or Immich? Point the
+neighborhood at it:
+
+```sh
+intraweb library detect                  # find services already running here
+intraweb library detect --add            # ...and list them all
+intraweb library add Films 8096          # anything else, by port
+intraweb library add Books 8083 --kind books
+intraweb library list
+intraweb libraries bob                   # what bob points at
+```
+
+Each library shows up as a button on your card in everyone's dashboard. It is
+a link, not a relay: their browser goes straight to the service on your
+machine, so the media never passes through intraweb or a hub, and it streams
+as fast as the two machines manage. The service has to listen on your network
+(not only on localhost) and your firewall has to allow its port; `library add`
+warns if nothing is answering yet.
+
+The dashboard has the same thing as a **Media libraries** box: *Find services
+on this computer*, then one click per service. Detection recognises a service
+by its own name on its own page, not by an open port, and knows Jellyfin,
+Plex, Navidrome, Audiobookshelf, Calibre-Web, Kavita, Komga, Immich,
+PhotoPrism, Kiwix, Home Assistant, Paperless-ngx, Mealie, Forgejo and Gitea.
+Listing, removing and detecting only answer to this machine; a neighbor asking
+gets a 403, so the dashboard's port is not a free port scan.
+
+A neighbor's list is checked before it is shown: names lose markup, a path
+can only be a path on that neighbor's own address, and nobody can list more
+than sixteen.
+
+## No router? Bring one
+
+intraweb only needs machines that can hear each other. It does not need the
+internet, and it does not need a router.
+
+- **An ESP32.** `hardware/esp32-ap` turns a $5 board into a Wi-Fi network on a
+  battery bank: up to 10 devices, a page that tells newcomers what to run, and
+  nothing stored on it. See its README for flashing.
+- **A laptop or Pi.** `nmcli device wifi hotspot ssid intraweb password
+  neighborhood` makes a network on Linux; the machine sharing it runs
+  `intraweb up` like everyone else.
+- **Two laptops and a cable.** Plug Ethernet straight between them; both take
+  link-local addresses and find each other with no router or DHCP.
+- **A phone hotspot**, with mobile data off if you want to be sure nothing
+  leaves the room. Windows and macOS hotspots usually want an internet
+  connection to share, so offline, use a Linux laptop, a Pi or the ESP32.
+- **Any old router** with no cable in the WAN port.
+
+Whichever you use, check client isolation is off, and run `intraweb doctor` if
+nobody shows up.
 
 ## Status
 
