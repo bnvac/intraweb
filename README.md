@@ -12,6 +12,20 @@ intraweb up
 
 That is the whole setup. Nodes find each other in about a second.
 
+![Three nodes finding each other and chatting, recorded from the real dashboard](docs/demo.gif)
+
+### Try it in 60 seconds
+
+Two nodes on one machine, no network setup:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bnvac/intraweb/HEAD/install.sh | sh
+INTRAWEB_VAULT=/tmp/a intraweb up --hub --nickname alice --port 8480 &
+INTRAWEB_VAULT=/tmp/b intraweb up --nickname bob --port 8481 &
+# open http://localhost:8480 -- bob appears within a couple of seconds
+INTRAWEB_VAULT=/tmp/b intraweb say "hello from bob"
+```
+
 ## The idea
 
 Most "local network" software makes one machine the server and everybody else a
@@ -36,7 +50,7 @@ your data lives on somebody's instance.
 Single static binary, no runtime dependencies:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/2008wbbv/intraweb/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/bnvac/intraweb/HEAD/install.sh | sh
 ```
 
 That fetches a prebuilt binary if one exists for your machine. If it does not,
@@ -61,7 +75,7 @@ xcode-select --install                    # macOS
 Then:
 
 ```sh
-git clone https://github.com/2008wbbv/intraweb.git
+git clone https://github.com/bnvac/intraweb.git
 cd intraweb
 sh install.sh          # builds and installs to ~/.local/bin
 # or: cargo build --release   → target/release/intraweb
